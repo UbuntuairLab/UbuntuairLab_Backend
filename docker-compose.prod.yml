@@ -1,0 +1,220 @@
+version: '3.8'
+
+name: ubuntuairlab-production
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ubuntuairlab_postgres_prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-airport_db}
+      POSTGRES_USER: ${DB_USER:-airport_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-airport_pass}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-airport_user} -d ${DB_NAME:-airport_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - airlab_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ubuntuairlab_redis_prod
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - airlab_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ubuntuairlab-backend:latest
+    container_name: ubuntuairlab_backend_prod
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Database
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-airport_user}:${DB_PASSWORD:-airport_pass}@postgres:5432/${DB_NAME:-airport_db}
+      - DATABASE_ECHO=${DATABASE_ECHO:-false}
+      
+      # Redis
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - ENABLE_PREDICTION_CACHE=${ENABLE_PREDICTION_CACHE:-true}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-300}
+      
+      # OpenSky API
+      - OPENSKY_USERNAME=${OPENSKY_USERNAME}
+      - OPENSKY_PASSWORD=${OPENSKY_PASSWORD}
+      - OPENSKY_API_BASE_URL=${OPENSKY_API_BASE_URL:-https://opensky-network.org/api}
+      
+      # Airport Config
+      - AIRPORT_ICAO=${AIRPORT_ICAO:-DXXX}
+      - AIRPORT_NAME=${AIRPORT_NAME:-Lome Airport}
+      
+      # Sync Configuration
+      - SYNC_INTERVAL_MINUTES=${SYNC_INTERVAL_MINUTES:-5}
+      - SYNC_LOOKBACK_HOURS=${SYNC_LOOKBACK_HOURS:-2}
+      
+      # JWT Authentication
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - JWT_EXPIRATION_MINUTES=${JWT_EXPIRATION_MINUTES:-60}
+      
+      # API Configuration
+      - API_V1_PREFIX=${API_V1_PREFIX:-/api/v1}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      
+      # Monitoring
+      - ENABLE_METRICS=${ENABLE_METRICS:-true}
+      - METRICS_PORT=${METRICS_PORT:-9090}
+      
+      # ML Models
+      - USE_MOCK_AI=${USE_MOCK_AI:-false}
+      - MODEL_ETA_ENDPOINT=${MODEL_ETA_ENDPOINT}
+      - MODEL_OCCUPATION_ENDPOINT=${MODEL_OCCUPATION_ENDPOINT}
+      - MODEL_API_KEY=${MODEL_API_KEY}
+      - MODEL_TIMEOUT_SECONDS=${MODEL_TIMEOUT_SECONDS:-30}
+      - MODEL_MAX_RETRIES=${MODEL_MAX_RETRIES:-3}
+    
+    ports:
+      - "${API_PORT:-8000}:8000"
+      - "${METRICS_PORT:-9090}:9090"
+    
+    volumes:
+      - ./logs:/app/logs
+      - ./alembic:/app/alembic
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    networks:
+      - airlab_network
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Nginx Reverse Proxy (Optional - pour production)
+  nginx:
+    image: nginx:alpine
+    container_name: ubuntuairlab_nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/logs:/var/log/nginx
+    networks:
+      - airlab_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles:
+      - production
+
+  # Prometheus (Monitoring - Optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ubuntuairlab_prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - airlab_network
+    profiles:
+      - monitoring
+
+  # Grafana (Visualization - Optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ubuntuairlab_grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    networks:
+      - airlab_network
+    profiles:
+      - monitoring
+
+networks:
+  airlab_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local

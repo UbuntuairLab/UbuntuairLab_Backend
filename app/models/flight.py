@@ -1,4 +1,5 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Enum as SQLEnum, Index
+from sqlalchemy import Column, String, Integer, Float, DateTime, Enum as SQLEnum, Index, ForeignKey
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
@@ -34,8 +35,8 @@ class Flight(Base):
     origin_country = Column(String(100), nullable=True, doc="Country inferred from ICAO24")
     
     # Flight details
-    flight_type = Column(SQLEnum(FlightType), nullable=False, index=True, doc="Arrival or departure")
-    status = Column(SQLEnum(FlightStatus), default=FlightStatus.SCHEDULED, index=True, doc="Processing status")
+    flight_type = Column(String(20), nullable=False, index=True, doc="Arrival or departure")
+    status = Column(String(20), default="scheduled", index=True, doc="Processing status")
     
     # Airports
     departure_airport = Column(String(4), nullable=True, index=True, doc="ICAO code of departure airport")
@@ -44,6 +45,13 @@ class Flight(Base):
     # Timestamps
     first_seen = Column(Integer, nullable=False, doc="Unix timestamp of first detection")
     last_seen = Column(Integer, nullable=False, doc="Unix timestamp of last detection")
+    
+    # Estimated times (from schedule/ATC)
+    est_arrival_time = Column(DateTime(timezone=True), nullable=True, doc="Estimated arrival time")
+    est_departure_time = Column(DateTime(timezone=True), nullable=True, doc="Estimated departure time")
+    
+    # Parking assignment
+    parking_spot_id = Column(String(20), ForeignKey('parking_spots.spot_id', ondelete='SET NULL'), nullable=True, index=True, doc="Assigned parking spot")
     
     # AI predictions
     predicted_eta = Column(DateTime(timezone=True), nullable=True, doc="AI-predicted ETA")
@@ -61,6 +69,10 @@ class Flight(Base):
         Index('idx_flight_airports', 'departure_airport', 'arrival_airport'),
         Index('idx_flight_timestamps', 'first_seen', 'last_seen'),
     )
+    
+    # Relationships
+    parking_spot = relationship("ParkingSpot", back_populates="flights")
+    # notifications relationship defined in Notification model
     
     def __repr__(self):
         return f"<Flight(icao24={self.icao24}, callsign={self.callsign}, status={self.status})>"

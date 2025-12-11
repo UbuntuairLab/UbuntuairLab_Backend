@@ -2,14 +2,16 @@ import logging
 import asyncio
 from datetime import datetime, timedelta
 from typing import List, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import get_settings
 from app.services.external.opensky_client import OpenSkyClient
-from app.services.ai_models.factory import AIModelFactory
+from app.services.ml.prediction_service import MLPredictionService
+from app.services.business.parking_service import ParkingService
+from app.repositories.flight_repository import FlightRepository
 from app.schemas.opensky import FlightData, FlightType
-from app.schemas.ai_models import (
-    ETAETDInput, OccupationInput, ConflitInput
-)
-from app.exceptions import OpenSkyAPIException, AIModelException
+from app.models.flight import FlightStatus, FlightType as FlightTypeEnum
+from app.exceptions import OpenSkyAPIException
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -18,23 +20,24 @@ settings = get_settings()
 class FlightOrchestrator:
     """
     Main orchestrator for flight processing pipeline.
-    Coordinates OpenSky data retrieval, AI predictions, and business logic.
+    Coordinates OpenSky data retrieval, ML predictions via Hugging Face API, and database persistence.
     """
     
-    def __init__(self):
+    def __init__(self, db: AsyncSession):
+        self.db = db
         self.opensky_client = OpenSkyClient()
-        self.ai_factory = AIModelFactory()
+        self.ml_service = MLPredictionService(db)
+        self.parking_service = ParkingService(db)
+        self.flight_repo = FlightRepository(db)
         self.airport_icao = settings.AIRPORT_ICAO
         self.lookback_hours = settings.SYNC_LOOKBACK_HOURS
     
     async def initialize(self):
         """Initialize dependencies"""
-        await self.ai_factory.initialize()
-        logger.info("FlightOrchestrator initialized")
+        logger.info("FlightOrchestrator initialized with ML Hugging Face API integration")
     
     async def shutdown(self):
         """Cleanup resources"""
-        await self.ai_factory.shutdown()
         logger.info("FlightOrchestrator shutdown")
     
     def _get_time_window(self) -> tuple[int, int]:
@@ -157,26 +160,24 @@ class FlightOrchestrator:
     
     async def process_single_flight(self, flight: FlightData) -> bool:
         """
-        Process a single flight through the complete AI pipeline.
+        Process a single flight through complete pipeline.
         
-        Steps:
+        Pipeline:
         1. Determine flight type (arrival/departure)
-        2. Call ETA/ETD prediction model
-        3. Call occupation duration model
-        4. Call conflict detection model
-        5. Apply business logic (parking allocation)
-        6. Persist results to database
+        2. Persist/update flight in database (upsert)
+        3. Call MLPredictionService for complete ML prediction (Hugging Face API)
+        4. Database automatically updated by MLPredictionService
         
         Args:
-            flight: Flight data from OpenSky
+            flight: Flight data from OpenSky Network
         
         Returns:
             True if processing succeeded, False otherwise
         """
         try:
-            logger.debug(f"Processing flight {flight.icao24}")
+            logger.debug(f"Processing flight {flight.icao24} ({flight.callsign})")
             
-            # Determine flight type
+            # Step 1: Determine flight type
             flight_type = flight.get_flight_type(self.airport_icao)
             
             if flight_type is None:
@@ -185,166 +186,60 @@ class FlightOrchestrator:
                 )
                 return False
             
-            # Step 1: Predict ETA/ETD
-            eta_prediction = await self._predict_eta(flight, flight_type)
-            
-            # Step 2: Predict occupation duration
-            occupation_prediction = await self._predict_occupation(
-                flight,
-                eta_prediction
-            )
-            
-            # Step 3: Check for conflicts
-            conflict_prediction = await self._predict_conflict(
-                flight,
-                eta_prediction,
-                occupation_prediction
-            )
-            
-            # Step 4: Apply business logic (will be implemented with DB layer)
-            # TODO: Implement parking allocation logic
-            # await self._allocate_parking(flight, predictions)
-            
+            # Step 2: Upsert flight to database (create or update)
+            db_flight = await self.flight_repo.upsert(flight)
             logger.info(
-                f"Successfully processed flight {flight.icao24}",
+                f"Flight {db_flight.icao24} persisted to DB (type: {flight_type.value})"
+            )
+            
+            # Step 3: Execute ML predictions via Hugging Face API
+            # MLPredictionService handles:
+            # - Calling ML API (https://tagba-ubuntuairlab.hf.space/predict)
+            # - Storing predictions in ai_predictions table
+            # - Updating flight record with predicted_eta, predicted_etd, predicted_delay_minutes, etc.
+            prediction_result = await self.ml_service.predict_and_update_flight(
+                flight=db_flight,
+                force_refresh=False
+            )
+            
+            # Step 4: Allocate parking spot
+            # Use ML predictions for occupation time and conflict detection
+            occupation_minutes = prediction_result.get("model_2_occupation", {}).get("temps_occupation_minutes", 60)
+            conflict_data = prediction_result.get("model_3_conflict", {})
+            
+            parking_result = await self.parking_service.allocate_spot(
+                flight=db_flight,
+                predicted_occupation_minutes=int(occupation_minutes),
+                conflict_data=conflict_data
+            )
+            
+            if parking_result.success:
+                logger.info(
+                    f"Parking allocated: {parking_result.spot.spot_id} "
+                    f"(overflow={parking_result.overflow_to_military})"
+                )
+            else:
+                logger.error(
+                    f"Parking allocation failed for {db_flight.icao24}: {parking_result.reason}"
+                )
+            
+            # Step 5: Log success with key metrics
+            logger.info(
+                f"✅ Flight {db_flight.icao24} processed successfully",
                 extra={
+                    "callsign": db_flight.callsign,
                     "flight_type": flight_type.value,
-                    "eta_delay": eta_prediction.retard_minutes,
-                    "occupation": occupation_prediction.occupation_minutes,
-                    "conflict": conflict_prediction.conflit
+                    "eta_minutes": prediction_result.get("model_1_eta", {}).get("eta_ajuste"),
+                    "occupation_minutes": prediction_result.get("model_2_occupation", {}).get("temps_occupation_minutes"),
+                    "decision": prediction_result.get("model_3_conflict", {}).get("decision_label")
                 }
             )
             
             return True
             
-        except AIModelException as e:
-            logger.error(
-                f"AI model error processing flight {flight.icao24}: {str(e)}"
-            )
-            return False
         except Exception as e:
             logger.error(
-                f"Error processing flight {flight.icao24}: {str(e)}"
+                f"❌ Error processing flight {flight.icao24}: {str(e)}",
+                exc_info=True
             )
             return False
-    
-    async def _predict_eta(self, flight: FlightData, flight_type: FlightType):
-        """
-        Predict adjusted ETA/ETD for flight.
-        
-        Args:
-            flight: Flight data
-            flight_type: ARRIVAL or DEPARTURE
-        
-        Returns:
-            ETAETDOutput with adjusted times
-        """
-        # Prepare input (mock data for now, will use real weather API later)
-        eta_input = ETAETDInput(
-            latitude=0.0,  # TODO: Get from flight tracking
-            longitude=0.0,
-            altitude=10000.0,
-            vitesse=250.0,
-            heading=90.0,
-            vertical_rate=0.0,
-            distance=100.0,
-            eta_theorique=datetime.fromtimestamp(flight.last_seen).isoformat(),
-            atd=datetime.fromtimestamp(flight.first_seen).isoformat(),
-            type_avion="A320",  # TODO: Get from aircraft database
-            compagnie=flight.callsign[:3] if flight.callsign else "UNKNOWN",
-            vent=15.0,
-            visibilite=10.0,
-            pluie=0,
-            orage=0,
-            temperature=28.0,
-            heure_locale=datetime.now().hour,
-            jour_semaine=datetime.now().weekday()
-        )
-        
-        eta_model = self.ai_factory.get_eta_model()
-        async with eta_model:
-            return await eta_model.predict(eta_input)
-    
-    async def _predict_occupation(self, flight: FlightData, eta_prediction):
-        """
-        Predict parking occupation duration.
-        
-        Args:
-            flight: Flight data
-            eta_prediction: ETA prediction result
-        
-        Returns:
-            OccupationOutput with duration
-        """
-        occupation_input = OccupationInput(
-            type_avion="A320",
-            compagnie=flight.callsign[:3] if flight.callsign else "UNKNOWN",
-            eta_adjusted=eta_prediction.eta_adjusted,
-            retard=eta_prediction.retard_minutes,
-            provenance="medium",
-            passagers=150,
-            operation="debarquement",
-            carburant=1,
-            catering=0,
-            maintenance=0,
-            passerelle=1,
-            historique_occupation_type=45.0,
-            pluie=0,
-            vent=15.0,
-            visibilite=10.0,
-            temperature_extreme=0,
-            arrivees_40min=2,
-            departs_40min=2,
-            taux_occupation=60.0,
-            pistes_disponibles=1
-        )
-        
-        occupation_model = self.ai_factory.get_occupation_model()
-        async with occupation_model:
-            return await occupation_model.predict(occupation_input)
-    
-    async def _predict_conflict(
-        self,
-        flight: FlightData,
-        eta_prediction,
-        occupation_prediction
-    ):
-        """
-        Detect potential parking conflicts.
-        
-        Args:
-            flight: Flight data
-            eta_prediction: ETA prediction result
-            occupation_prediction: Occupation prediction result
-        
-        Returns:
-            ConflitOutput with conflict detection
-        """
-        conflit_input = ConflitInput(
-            eta_adjusted=eta_prediction.eta_adjusted,
-            type_avion_in="A320",
-            compagnie_in=flight.callsign[:3] if flight.callsign else "UNKNOWN",
-            besoin_passerelle=1,
-            sensibilite_meteo=0,
-            importance_vol="commercial",
-            occupation_predite=occupation_prediction.occupation_minutes,
-            temps_restant=30,
-            retard_historique=10,
-            type_avion_out="B737",
-            operations_en_cours="none",
-            taille_compatible=1,
-            distance_terminal=200,
-            reserve=0,
-            maintenance=0,
-            pluie=0,
-            vent_fort=0,
-            visibilite=10.0,
-            approche_60min=3,
-            depart_60min=2,
-            saturation_piste=0,
-            taux_occupation_global=60.0
-        )
-        
-        conflit_model = self.ai_factory.get_conflit_model()
-        async with conflit_model:
-            return await conflit_model.predict(conflit_input)

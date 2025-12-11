@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Enum as SQLEnum, ForeignKey, JSON, Index
+from sqlalchemy import Column, String, Integer, Boolean, Float, DateTime, Enum as SQLEnum, ForeignKey, JSON, Index
 from sqlalchemy.sql import func
 import enum
 from app.database import Base
@@ -32,12 +32,9 @@ class AIPrediction(Base):
     input_data = Column(JSON, nullable=False, doc="Input parameters sent to model")
     output_data = Column(JSON, nullable=False, doc="Prediction results from model")
     
-    # Confidence and metrics
-    confidence_score = Column(Float, nullable=True, doc="Model confidence (0-1)")
-    prediction_time_ms = Column(Integer, nullable=True, doc="Prediction latency in milliseconds")
-    
-    # Cache information
-    from_cache = Column(Integer, default=0, doc="Whether result came from cache (1=yes, 0=no)")
+    # Cache information and metrics (match migration schema)
+    cached = Column(Boolean, default=False, doc="Whether result came from cache")
+    execution_time_ms = Column(Integer, nullable=True, doc="Prediction latency in milliseconds")
     
     # Metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now(), doc="Prediction timestamp")

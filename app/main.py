@@ -1,6 +1,7 @@
 """
-Main FastAPI application entry point.
-Initializes the API, database, scheduler, and monitoring.
+ASGI entrypoint module providing `app` at `app.main:app`.
+This mirrors the root `main.py` FastAPI application so deployments referencing
+`app.main:app` can import successfully.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -26,31 +27,27 @@ scheduler: FlightSyncScheduler = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application lifespan manager.
-    Handles startup and shutdown events.
-    """
     global scheduler
-    
-    logger.info("Starting UbuntuAirLab Backend...")
-    
+
+    logger.info("Starting UbuntuAirLab Backend (app.main)...")
+
     # Create database tables if needed
     logger.info("Initializing database...")
     await init_db()
-    
+
     # Initialize and start scheduler
     logger.info("Starting flight sync scheduler...")
     scheduler = FlightSyncScheduler()
     await scheduler.start()
-    
+
     # Inject scheduler into sync endpoints
     from app.api.v1.endpoints import sync
     sync.set_scheduler(scheduler)
-    
+
     logger.info("Application startup complete")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down application...")
     if scheduler:
@@ -93,7 +90,6 @@ if settings.ENABLE_METRICS:
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "name": "UbuntuAirLab Backend API",
         "version": "1.0.0",
@@ -104,21 +100,8 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "scheduler": hasattr(scheduler, 'scheduler') and scheduler.scheduler.running if scheduler else False,
         "next_sync": scheduler.get_next_run_time() if scheduler else None
     }
-
-
-if __name__ == "__main__":
-    import uvicorn
-    
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level=settings.LOG_LEVEL.lower()
-    )

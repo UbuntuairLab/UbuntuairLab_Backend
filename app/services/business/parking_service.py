@@ -1,22 +1,15 @@
 import logging
 from typing import Optional, List
-from enum import Enum
+from datetime import datetime, timedelta, timezone
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.repositories.parking_repository import ParkingSpotRepository, ParkingAllocationRepository
+from app.repositories.flight_repository import FlightRepository
+from app.services.notifications.notification_service import NotificationService
+from app.models.parking import SpotType, SpotStatus, AircraftSizeCategory, ParkingSpot, ParkingAllocation
+from app.models.flight import Flight
 
 logger = logging.getLogger(__name__)
-
-
-class SpotType(str, Enum):
-    """Parking spot type"""
-    CIVIL = "civil"
-    MILITARY = "military"
-
-
-class SpotStatus(str, Enum):
-    """Parking spot availability status"""
-    AVAILABLE = "available"
-    OCCUPIED = "occupied"
-    RESERVED = "reserved"
-    MAINTENANCE = "maintenance"
 
 
 class ParkingAllocationResult:
@@ -25,14 +18,14 @@ class ParkingAllocationResult:
     def __init__(
         self,
         success: bool,
-        spot_id: Optional[str] = None,
-        spot_type: Optional[SpotType] = None,
+        allocation: Optional[ParkingAllocation] = None,
+        spot: Optional[ParkingSpot] = None,
         overflow_to_military: bool = False,
         reason: Optional[str] = None
     ):
         self.success = success
-        self.spot_id = spot_id
-        self.spot_type = spot_type
+        self.allocation = allocation
+        self.spot = spot
         self.overflow_to_military = overflow_to_military
         self.reason = reason
 
@@ -43,10 +36,12 @@ class ParkingService:
     Implements rules for civil/military overflow and conflict resolution.
     """
     
-    def __init__(self):
-        # This will be replaced with database queries once DB layer is implemented
-        self._mock_civil_spots = []
-        self._mock_military_spots = []
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.spot_repo = ParkingSpotRepository(db)
+        self.allocation_repo = ParkingAllocationRepository(db)
+        self.flight_repo = FlightRepository(db)
+        self.notification_service = NotificationService(db)
     
     def find_available_civil_spots(
         self,
@@ -92,94 +87,303 @@ class ParkingService:
         logger.debug(f"Searching military spots for {aircraft_size} aircraft")
         return []
     
-    def allocate_spot(
+    async def allocate_spot(
         self,
-        flight_id: str,
-        aircraft_type: str,
-        requires_jetway: bool,
-        predicted_duration: int,
-        conflict_detected: bool
+        flight: Flight,
+        predicted_occupation_minutes: int,
+        conflict_data: Optional[dict] = None
     ) -> ParkingAllocationResult:
         """
         Main allocation logic: find optimal spot or overflow to military.
+        Implements smart saturation management by transferring late-departure flights.
         
         Args:
-            flight_id: Unique flight identifier (ICAO24)
-            aircraft_type: Aircraft type (e.g., A320, B737)
-            requires_jetway: Whether jetway is needed
-            predicted_duration: Expected occupation duration in minutes
-            conflict_detected: Whether AI detected a conflict
+            flight: Flight object
+            predicted_occupation_minutes: Expected occupation duration
+            conflict_data: ML model_3_conflict data
         
         Returns:
             ParkingAllocationResult with allocation decision
         """
         logger.info(
-            f"Allocating parking for flight {flight_id}",
+            f"Allocating parking for flight {flight.icao24} ({flight.callsign})",
             extra={
-                "aircraft_type": aircraft_type,
-                "jetway": requires_jetway,
-                "duration": predicted_duration,
-                "conflict": conflict_detected
+                "duration": predicted_occupation_minutes,
+                "flight_type": flight.flight_type.value
             }
         )
         
-        # Determine aircraft size category
-        aircraft_size = self._get_aircraft_size(aircraft_type)
+        # Determine aircraft size
+        aircraft_size = self._get_aircraft_size("A320")  # Default, extract from flight if available
         
-        # Step 1: Try to find civil spot
-        civil_spots = self.find_available_civil_spots(
-            aircraft_size,
-            requires_jetway
+        # Check conflict probability
+        conflict_detected = False
+        conflict_probability = 0.0
+        if conflict_data:
+            conflict_probability = conflict_data.get("risque_conflit", 0.0)
+            conflict_detected = conflict_probability > 0.5
+        
+        # Try civil spots first
+        civil_spots = await self.spot_repo.get_available_by_type(
+            spot_type=SpotType.CIVIL,
+            aircraft_size=aircraft_size
         )
         
         if civil_spots and not conflict_detected:
-            # Found available civil spot
-            best_spot = self._select_optimal_spot(civil_spots, requires_jetway)
+            # Allocate to civil spot
+            best_spot = civil_spots[0]  # Already sorted by priority
             
-            logger.info(
-                f"Allocated civil spot {best_spot['id']} for flight {flight_id}"
+            predicted_end_time = datetime.utcnow() + timedelta(minutes=predicted_occupation_minutes)
+            
+            allocation = await self.allocation_repo.create(
+                flight_icao24=flight.icao24,
+                spot_id=best_spot.spot_id,
+                predicted_duration_minutes=predicted_occupation_minutes,
+                predicted_end_time=predicted_end_time,
+                conflict_detected=conflict_detected,
+                conflict_probability=conflict_probability
             )
+            
+            # Update spot status
+            await self.spot_repo.update_status(best_spot.spot_id, SpotStatus.OCCUPIED)
+            
+            # Update flight parking assignment
+            await self.flight_repo.update_parking_assignment(flight.icao24, best_spot.spot_id)
+            
+            logger.info(f"Allocated civil spot {best_spot.spot_id} for flight {flight.icao24}")
             
             return ParkingAllocationResult(
                 success=True,
-                spot_id=best_spot['id'],
-                spot_type=SpotType.CIVIL,
+                allocation=allocation,
+                spot=best_spot,
                 overflow_to_military=False,
-                reason="Civil spot available"
+                reason="Civil spot allocated"
             )
         
-        # Step 2: Check if overflow to military is necessary
-        if conflict_detected or not civil_spots:
-            logger.warning(
-                f"No civil spots available for flight {flight_id}, checking military overflow"
+        # Civil saturation detected - try smart transfer to military
+        logger.warning(f"Civil saturation for flight {flight.icao24}, attempting smart military transfer")
+        
+        # Try to free a civil spot by transferring late-departure flight to military
+        transferred = await self._transfer_late_departure_to_military(flight, aircraft_size)
+        
+        if transferred:
+            # A civil spot was freed, allocate it to the new flight
+            civil_spots = await self.spot_repo.get_available_by_type(
+                spot_type=SpotType.CIVIL,
+                aircraft_size=aircraft_size
             )
             
-            military_spots = self.find_available_military_spots(aircraft_size)
-            
-            if military_spots:
-                best_spot = self._select_optimal_spot(military_spots, False)
+            if civil_spots:
+                best_spot = civil_spots[0]
+                predicted_end_time = datetime.utcnow() + timedelta(minutes=predicted_occupation_minutes)
                 
-                logger.info(
-                    f"Allocated military spot {best_spot['id']} for flight {flight_id} (overflow)"
+                allocation = await self.allocation_repo.create(
+                    flight_icao24=flight.icao24,
+                    spot_id=best_spot.spot_id,
+                    predicted_duration_minutes=predicted_occupation_minutes,
+                    predicted_end_time=predicted_end_time,
+                    conflict_detected=conflict_detected,
+                    conflict_probability=conflict_probability
                 )
+                
+                await self.spot_repo.update_status(best_spot.spot_id, SpotStatus.OCCUPIED)
+                await self.flight_repo.update_parking_assignment(flight.icao24, best_spot.spot_id)
+                
+                logger.info(f"Allocated civil spot {best_spot.spot_id} after military transfer")
                 
                 return ParkingAllocationResult(
                     success=True,
-                    spot_id=best_spot['id'],
-                    spot_type=SpotType.MILITARY,
-                    overflow_to_military=True,
-                    reason="Civil saturation - military overflow"
+                    allocation=allocation,
+                    spot=best_spot,
+                    overflow_to_military=False,
+                    reason="Civil spot allocated after smart transfer"
                 )
         
-        # Step 3: No spots available
-        logger.error(f"No parking available for flight {flight_id}")
+        # No automatic military assignment for new flights - require admin decision
+        logger.error(
+            f"Complete civil saturation for flight {flight.icao24}. "
+            f"No automatic transfer possible. Admin intervention required."
+        )
+        
+        # Create alert notification for admin
+        await self.notification_service.create_saturation_alert(
+            occupation_rate=100.0,
+            available_spots=0
+        )
         
         return ParkingAllocationResult(
             success=False,
-            reason="No parking spots available (civil and military saturated)"
+            reason="Complete civil saturation - no automatic solution available. Admin must manually assign to military or reschedule."
         )
     
-    def _get_aircraft_size(self, aircraft_type: str) -> str:
+    
+    async def _transfer_late_departure_to_military(
+        self,
+        incoming_flight: Flight,
+        aircraft_size: AircraftSizeCategory
+    ) -> bool:
+        """
+        Transfer the flight with the latest departure to military to free a civil spot.
+        Only transfers if military spots are available.
+        
+        Args:
+            incoming_flight: The new flight needing a civil spot
+            aircraft_size: Required aircraft size category
+        
+        Returns:
+            True if a flight was successfully transferred
+        """
+        # Check if military spots are available
+        military_spots = await self.spot_repo.get_available_by_type(
+            spot_type=SpotType.MILITARY,
+            aircraft_size=aircraft_size
+        )
+        
+        if not military_spots:
+            logger.info("No military spots available for transfer")
+            return False
+        
+        # Get all active civil allocations
+        active_allocations = await self.allocation_repo.get_active_allocations()
+        
+        # Filter for civil spots only
+        civil_allocations = [
+            alloc for alloc in active_allocations
+            if not alloc.overflow_to_military
+        ]
+        
+        if not civil_allocations:
+            logger.info("No civil allocations to transfer")
+            return False
+        
+        # Find flight with latest predicted end time (departs last)
+        latest_allocation = max(
+            civil_allocations,
+            key=lambda x: x.predicted_end_time
+        )
+        
+        # Get the flight details
+        late_flight = await self.flight_repo.get_by_icao24(latest_allocation.flight_icao24)
+        if not late_flight:
+            logger.warning(f"Could not find flight {latest_allocation.flight_icao24}")
+            return False
+        
+        # Get the current civil spot
+        current_spot = await self.spot_repo.get_by_id(latest_allocation.spot_id)
+        if not current_spot:
+            logger.warning(f"Could not find spot {latest_allocation.spot_id}")
+            return False
+        
+        logger.info(
+            f"Transferring flight {late_flight.icao24} from civil spot {current_spot.spot_id} "
+            f"to military (departs at {latest_allocation.predicted_end_time})"
+        )
+        
+        # Complete current allocation
+        now = datetime.utcnow()
+        duration = int((now - latest_allocation.allocated_at).total_seconds() / 60)
+        await self.allocation_repo.complete_allocation(
+            allocation_id=latest_allocation.allocation_id,
+            actual_start_time=latest_allocation.allocated_at,
+            actual_end_time=now,
+            actual_duration_minutes=duration
+        )
+        
+        # Free civil spot
+        await self.spot_repo.update_status(current_spot.spot_id, SpotStatus.AVAILABLE)
+        
+        # Allocate to military spot
+        military_spot = military_spots[0]
+        remaining_minutes = int((latest_allocation.predicted_end_time - now).total_seconds() / 60)
+        
+        new_allocation = await self.allocation_repo.create(
+            flight_icao24=late_flight.icao24,
+            spot_id=military_spot.spot_id,
+            predicted_duration_minutes=remaining_minutes,
+            predicted_end_time=latest_allocation.predicted_end_time,
+            overflow_to_military=True,
+            overflow_reason="Transferred to free civil spot for earlier departure"
+        )
+        
+        # Update military spot status
+        await self.spot_repo.update_status(military_spot.spot_id, SpotStatus.OCCUPIED)
+        
+        # Update flight parking assignment
+        await self.flight_repo.update_parking_assignment(late_flight.icao24, military_spot.spot_id)
+        
+        # Create transfer notification
+        await self.notification_service.create_overflow_notification(
+            flight=late_flight,
+            reason=f"Transferred from {current_spot.spot_id} to prioritize earlier departures",
+            military_spot=military_spot
+        )
+        
+        logger.info(
+            f"Successfully transferred flight {late_flight.icao24} to military spot {military_spot.spot_id}, "
+            f"freed civil spot {current_spot.spot_id}"
+        )
+        
+        return True
+    
+    async def recall_from_military(
+        self,
+        flight: Flight,
+        civil_spot: ParkingSpot
+    ) -> bool:
+        """
+        Recall flight from military to civil parking when spot becomes available.
+        
+        Args:
+            flight: Flight object
+            civil_spot: Available civil spot
+        
+        Returns:
+            True if recall successful
+        """
+        logger.info(f"Recalling flight {flight.icao24} from military to civil spot {civil_spot.spot_id}")
+        
+        # Get current allocation
+        current_allocation = await self.allocation_repo.get_by_flight(flight.icao24)
+        if not current_allocation or not current_allocation.overflow_to_military:
+            logger.warning(f"Flight {flight.icao24} not in military overflow")
+            return False
+        
+        # Complete old allocation
+        now = datetime.now(timezone.utc)
+        duration = int((now - current_allocation.allocated_at).total_seconds() / 60)
+        await self.allocation_repo.complete_allocation(
+            allocation_id=current_allocation.allocation_id,
+            actual_start_time=current_allocation.allocated_at,
+            actual_end_time=now,
+            actual_duration_minutes=duration
+        )
+        
+        # Free military spot
+        await self.spot_repo.update_status(current_allocation.spot_id, SpotStatus.AVAILABLE)
+        
+        # Create new civil allocation
+        predicted_end_time = now + timedelta(minutes=current_allocation.predicted_duration_minutes)
+        new_allocation = await self.allocation_repo.create(
+            flight_icao24=flight.icao24,
+            spot_id=civil_spot.spot_id,
+            predicted_duration_minutes=current_allocation.predicted_duration_minutes,
+            predicted_end_time=predicted_end_time,
+            overflow_to_military=False
+        )
+        
+        # Update spot status
+        await self.spot_repo.update_status(civil_spot.spot_id, SpotStatus.OCCUPIED)
+        
+        # Update flight parking assignment
+        await self.flight_repo.update_parking_assignment(flight.icao24, civil_spot.spot_id)
+        
+        # Create recall notification
+        await self.notification_service.create_recall_notification(flight, civil_spot)
+        
+        logger.info(f"Successfully recalled flight {flight.icao24} to civil spot {civil_spot.spot_id}")
+        return True
+    
+    def _get_aircraft_size(self, aircraft_type: str) -> AircraftSizeCategory:
         """
         Determine aircraft size category from type.
         
@@ -187,106 +391,28 @@ class ParkingService:
             aircraft_type: Aircraft type code (e.g., A320, B737, B777)
         
         Returns:
-            Size category: small, medium, or large
+            Size category enum
         """
-        # Simplified categorization
         large_aircraft = ['B747', 'B777', 'B787', 'A330', 'A340', 'A350', 'A380']
         small_aircraft = ['ATR', 'DHC', 'CRJ', 'E190', 'E170']
         
         aircraft_upper = aircraft_type.upper()
         
         if any(large in aircraft_upper for large in large_aircraft):
-            return "large"
+            return AircraftSizeCategory.LARGE
         elif any(small in aircraft_upper for small in small_aircraft):
-            return "small"
+            return AircraftSizeCategory.SMALL
         else:
-            return "medium"
+            return AircraftSizeCategory.MEDIUM
     
-    def _select_optimal_spot(
-        self,
-        available_spots: List[dict],
-        requires_jetway: bool
-    ) -> dict:
-        """
-        Select the optimal spot from available options.
+    async def check_saturation(self) -> dict:
+        """Check parking saturation and create alerts if needed"""
+        stats = await self.allocation_repo.get_availability_stats()
         
-        Args:
-            available_spots: List of available spots
-            requires_jetway: Whether jetway is required
+        if stats["occupation_rate"] > 85:
+            await self.notification_service.create_saturation_alert(
+                occupation_rate=stats["occupation_rate"],
+                available_spots=stats["civil_available"]
+            )
         
-        Returns:
-            Best spot dictionary
-        """
-        if not available_spots:
-            return None
-        
-        # Prioritize spots with jetway if required
-        if requires_jetway:
-            jetway_spots = [s for s in available_spots if s.get('has_jetway', False)]
-            if jetway_spots:
-                available_spots = jetway_spots
-        
-        # Sort by distance to terminal (closest first)
-        sorted_spots = sorted(
-            available_spots,
-            key=lambda s: s.get('distance_to_terminal', 9999)
-        )
-        
-        return sorted_spots[0]
-    
-    def check_conflicts(
-        self,
-        spot_id: str,
-        incoming_eta: str,
-        predicted_duration: int
-    ) -> bool:
-        """
-        Check if incoming flight conflicts with current spot occupation.
-        
-        Args:
-            spot_id: Parking spot identifier
-            incoming_eta: ETA of incoming flight (ISO datetime)
-            predicted_duration: Duration needed in minutes
-        
-        Returns:
-            True if conflict detected, False otherwise
-        
-        Note:
-            This is a placeholder. Will be replaced with database queries.
-        """
-        # TODO: Implement with database repository
-        # Query current allocation for spot
-        # Check if incoming_eta falls within current occupation + buffer
-        logger.debug(f"Checking conflicts for spot {spot_id}")
-        return False
-    
-    def handle_overflow(
-        self,
-        flight_id: str,
-        from_spot_type: SpotType,
-        to_spot_type: SpotType
-    ) -> bool:
-        """
-        Handle overflow movement between civil and military parking.
-        
-        Args:
-            flight_id: Flight identifier
-            from_spot_type: Current spot type
-            to_spot_type: Target spot type
-        
-        Returns:
-            True if overflow handled successfully
-        
-        Note:
-            This is a placeholder. Will be replaced with database operations.
-        """
-        logger.info(
-            f"Handling overflow for flight {flight_id}: {from_spot_type} -> {to_spot_type}"
-        )
-        
-        # TODO: Implement with database repository
-        # Update allocation record
-        # Log overflow event
-        # Send notification if configured
-        
-        return True
+        return stats

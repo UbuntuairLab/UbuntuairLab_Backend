@@ -38,11 +38,11 @@ class ParkingSpot(Base):
     
     # Spot characteristics
     spot_number = Column(Integer, nullable=False, doc="Numeric spot number")
-    spot_type = Column(SQLEnum(SpotType), nullable=False, index=True, doc="Civil or military")
-    status = Column(SQLEnum(SpotStatus), default=SpotStatus.AVAILABLE, index=True, doc="Current status")
+    spot_type = Column(SQLEnum(SpotType, values_callable=lambda x: [e.value for e in x]), nullable=False, index=True, doc="Civil or military")
+    status = Column(SQLEnum(SpotStatus, values_callable=lambda x: [e.value for e in x]), default=SpotStatus.AVAILABLE, index=True, doc="Current status")
     
     # Capacity and features
-    aircraft_size_capacity = Column(SQLEnum(AircraftSizeCategory), nullable=False, doc="Maximum aircraft size")
+    aircraft_size_capacity = Column(SQLEnum(AircraftSizeCategory, values_callable=lambda x: [e.value for e in x]), nullable=False, doc="Maximum aircraft size")
     has_jetway = Column(Boolean, default=False, doc="Jetway/bridge available")
     distance_to_terminal = Column(Integer, nullable=False, doc="Distance to terminal in meters")
     
@@ -56,6 +56,7 @@ class ParkingSpot(Base):
     
     # Relationships
     allocations = relationship("ParkingAllocation", back_populates="spot", lazy="selectin")
+    flights = relationship("Flight", back_populates="parking_spot")
     
     # Indexes
     __table_args__ = (

@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     
     # AI Models Configuration
     USE_MOCK_AI: bool = True
+    
+    # ML API (Hugging Face Space: TAGBA/ubuntuairlab)
+    ML_API_BASE_URL: str = "https://tagba-ubuntuairlab.hf.space"
+    ML_API_TIMEOUT: float = 30.0
+    ML_API_MAX_RETRIES: int = 3
+    
+    # Legacy model endpoints (deprecated, use ML API)
     MODEL_ETA_ENDPOINT: str = "http://localhost:8001/api/v1/model/eta/predict"
     MODEL_OCCUPATION_ENDPOINT: str = "http://localhost:8001/api/v1/model/occupation/predict"
     MODEL_CONFLIT_ENDPOINT: str = "http://localhost:8001/api/v1/model/conflit/predict"
@@ -86,3 +93,7 @@ def get_settings() -> Settings:
     This function is cached to avoid reading .env file multiple times.
     """
     return Settings()
+
+
+# Global settings instance
+settings = get_settings()

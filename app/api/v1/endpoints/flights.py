@@ -3,7 +3,7 @@ Flight endpoints.
 Provides read access to flight data.
 """
 from typing import List, Optional
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,25 +153,64 @@ async def get_flight(
 @router.get("/{icao24}/predictions")
 async def get_flight_predictions(
     icao24: str,
+    refresh: bool = Query(False, description="Force new ML prediction"),
     db: AsyncSession = Depends(get_db),
     current_user = Depends(get_current_active_user)
 ):
     """
     Get AI predictions for a specific flight.
+    
+    - If refresh=true: Execute new ML prediction and update database
+    - If refresh=false: Return latest stored predictions
+    
     Requires authentication.
     """
-    from app.repositories.prediction_repository import PredictionRepository
+    from app.services.ml.prediction_service import MLPredictionService
     
+    # Check flight exists
     flight_repo = FlightRepository(db)
     flight = await flight_repo.get_by_icao24(icao24)
     
     if not flight:
         raise HTTPException(status_code=404, detail="Flight not found")
     
-    prediction_repo = PredictionRepository(db)
-    predictions = await prediction_repo.get_by_flight(icao24)
+    # Initialize ML service
+    ml_service = MLPredictionService(db)
     
-    return {
-        "flight_icao24": icao24,
-        "predictions": predictions
-    }
+    if refresh:
+        # Execute new prediction
+        try:
+            prediction_result = await ml_service.predict_and_update_flight(flight)
+            return {
+                "flight_icao24": icao24,
+                "callsign": flight.callsign,
+                "predictions": prediction_result,
+                "source": "fresh_ml_prediction",
+                "updated_at": datetime.now().isoformat()
+            }
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"ML prediction failed: {str(e)}"
+            )
+    else:
+        # Return stored predictions
+        summary = await ml_service.get_flight_predictions_summary(icao24)
+        
+        if not summary["has_predictions"]:
+            raise HTTPException(
+                status_code=404,
+                detail="No predictions found. Use ?refresh=true to generate predictions."
+            )
+        
+        return {
+            "flight_icao24": icao24,
+            "callsign": flight.callsign,
+            "predictions": {
+                "model_1_eta": summary["model_1_eta"],
+                "model_2_occupation": summary["model_2_occupation"],
+                "model_3_conflict": summary["model_3_conflict"]
+            },
+            "source": "stored_predictions",
+            "last_prediction_time": summary["last_prediction_time"].isoformat() if summary["last_prediction_time"] else None
+        }

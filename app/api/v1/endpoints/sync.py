@@ -5,9 +5,17 @@ Manage flight synchronization with OpenSky Network.
 from fastapi import APIRouter, Depends, HTTPException
 from app.api.v1.endpoints.auth import get_current_active_user
 from app.models.user import User
-import main
 
 router = APIRouter()
+
+
+# Global scheduler instance will be injected during startup
+_scheduler = None
+
+def set_scheduler(scheduler):
+    """Called by main.py during startup to inject scheduler instance"""
+    global _scheduler
+    _scheduler = scheduler
 
 
 @router.post("/trigger")
@@ -22,10 +30,10 @@ async def trigger_manual_sync(
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    if not main.scheduler:
+    if not _scheduler:
         raise HTTPException(status_code=503, detail="Scheduler not initialized")
     
-    result = await main.scheduler.trigger_manual_sync()
+    result = await _scheduler.trigger_manual_sync()
     
     return result
 
@@ -38,17 +46,13 @@ async def get_sync_status(
     Get synchronization scheduler status.
     Requires authentication.
     """
-    if not main.scheduler:
+    if not _scheduler:
         return {
             "scheduler_running": False,
             "next_run": None
         }
     
-    return {
-        "scheduler_running": main.scheduler.is_running(),
-        "next_run": main.scheduler.get_next_run_time(),
-        "interval_minutes": main.scheduler.interval_minutes
-    }
+    return _scheduler.get_status()
 
 
 @router.patch("/interval/{minutes}")
@@ -70,13 +74,13 @@ async def update_sync_interval(
             detail="Interval must be between 1 and 60 minutes"
         )
     
-    if not main.scheduler:
+    if not _scheduler:
         raise HTTPException(status_code=503, detail="Scheduler not initialized")
     
-    main.scheduler.update_interval(minutes)
+    _scheduler.update_interval(minutes)
     
     return {
         "message": "Sync interval updated",
         "new_interval_minutes": minutes,
-        "next_run": main.scheduler.get_next_run_time()
+        "next_run": _scheduler.get_next_run_time()
     }

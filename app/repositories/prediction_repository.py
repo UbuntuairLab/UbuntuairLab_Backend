@@ -18,9 +18,8 @@ class PredictionRepository:
         input_data: dict,
         output_data: dict,
         model_version: str = "1.0.0",
-        confidence_score: Optional[float] = None,
-        prediction_time_ms: Optional[int] = None,
-        from_cache: bool = False
+        execution_time_ms: Optional[int] = None,
+        cached: bool = False
     ) -> AIPrediction:
         """Create new AI prediction record"""
         prediction = AIPrediction(
@@ -29,9 +28,8 @@ class PredictionRepository:
             model_version=model_version,
             input_data=input_data,
             output_data=output_data,
-            confidence_score=confidence_score,
-            prediction_time_ms=prediction_time_ms,
-            from_cache=1 if from_cache else 0
+            execution_time_ms=execution_time_ms,
+            cached=cached
         )
         self.db.add(prediction)
         await self.db.commit()
@@ -72,7 +70,7 @@ class PredictionRepository:
             .where(
                 and_(
                     AIPrediction.flight_icao24 == flight_icao24,
-                    AIPrediction.model_type == model_type
+                    AIPrediction.model_type == model_type.value  # Use .value for enum comparison
                 )
             )
             .order_by(AIPrediction.created_at.desc())

@@ -30,6 +30,19 @@ class ParkingSpotUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class ParkingSpotCreate(BaseModel):
+    """Parking spot creation schema"""
+    spot_id: str
+    spot_number: int
+    spot_type: str  # 'civil' or 'military'
+    status: Optional[str] = 'available'
+    aircraft_size_capacity: str  # 'small', 'medium', 'large'
+    has_jetway: bool = False
+    distance_to_terminal: int
+    admin_configurable: Optional[bool] = True
+    notes: Optional[str] = None
+
+
 class ParkingAllocationResponse(BaseModel):
     """Parking allocation response schema"""
     allocation_id: int

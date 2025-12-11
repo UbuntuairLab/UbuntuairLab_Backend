@@ -39,7 +39,7 @@ class FlightRepository:
     
     async def get_active_flights(self, flight_type: Optional[FlightType] = None) -> List[Flight]:
         """Get all active (non-completed) flights"""
-        query = select(Flight).where(Flight.status.in_([FlightStatus.SCHEDULED, FlightStatus.ACTIVE]))
+        query = select(Flight).where(Flight.status.in_(["scheduled", "active"]))
         
         if flight_type:
             query = query.where(Flight.flight_type == flight_type)
@@ -121,6 +121,21 @@ class FlightRepository:
         await self.db.refresh(flight)
         return flight
     
+    async def update_parking_assignment(
+        self,
+        icao24: str,
+        parking_spot_id: Optional[str]
+    ) -> Optional[Flight]:
+        """Update flight parking spot assignment"""
+        flight = await self.get_by_icao24(icao24)
+        if not flight:
+            return None
+        
+        flight.parking_spot_id = parking_spot_id
+        await self.db.commit()
+        await self.db.refresh(flight)
+        return flight
+    
     async def get_flights_by_airport(
         self,
         airport_icao: str,
@@ -147,7 +162,7 @@ class FlightRepository:
         result = await self.db.execute(
             select(Flight).where(
                 and_(
-                    Flight.status == FlightStatus.COMPLETED,
+                    Flight.status == "completed",
                     Flight.last_seen < cutoff_timestamp
                 )
             )

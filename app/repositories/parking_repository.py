@@ -296,3 +296,123 @@ class ParkingAllocationRepository:
             select(ParkingAllocation).where(ParkingAllocation.conflict_detected == True)
         )
         return list(result.scalars().all())
+    
+    async def list_allocations(
+        self,
+        skip: int = 0,
+        limit: int = 50,
+        status_filter: Optional[str] = None,
+        overflow_only: bool = False,
+        active_only: bool = False
+    ) -> tuple[List[ParkingAllocation], int]:
+        """List allocations with pagination and filters"""
+        from sqlalchemy import func
+        from sqlalchemy.orm import joinedload
+        
+        query = select(ParkingAllocation).options(
+            joinedload(ParkingAllocation.spot)
+        )
+        count_query = select(func.count()).select_from(ParkingAllocation)
+        
+        # Apply filters
+        filters = []
+        
+        # Handle active_only parameter
+        if active_only:
+            filters.append(ParkingAllocation.actual_end_time.is_(None))
+        elif status_filter == "active":
+            filters.append(ParkingAllocation.actual_end_time.is_(None))
+        elif status_filter == "completed":
+            filters.append(ParkingAllocation.actual_end_time.isnot(None))
+        
+        if overflow_only:
+            filters.append(ParkingAllocation.overflow_to_military == True)
+        
+        if filters:
+            query = query.where(and_(*filters))
+            count_query = count_query.where(and_(*filters))
+        
+        # Get total count
+        total_result = await self.db.execute(count_query)
+        total = total_result.scalar() or 0
+        
+        # Apply pagination
+        query = query.order_by(ParkingAllocation.allocated_at.desc()).offset(skip).limit(limit)
+        
+        result = await self.db.execute(query)
+        allocations = list(result.scalars().all())
+        
+        return allocations, total
+    
+    async def get_allocation(self, allocation_id: int) -> Optional[ParkingAllocation]:
+        """Get allocation with eager loaded relationships"""
+        from sqlalchemy.orm import joinedload
+        
+        result = await self.db.execute(
+            select(ParkingAllocation)
+            .options(
+                joinedload(ParkingAllocation.spot)
+            )
+            .where(ParkingAllocation.allocation_id == allocation_id)
+        )
+        return result.scalar_one_or_none()
+    
+    async def get_availability_stats(self) -> dict:
+        """Get parking availability statistics"""
+        from sqlalchemy import func, case
+        from app.models.parking import ParkingSpot, SpotType, SpotStatus
+        
+        # Get civil spot stats
+        civil_total_result = await self.db.execute(
+            select(func.count()).select_from(ParkingSpot).where(ParkingSpot.spot_type == SpotType.CIVIL)
+        )
+        civil_total = civil_total_result.scalar() or 0
+        
+        civil_occupied_result = await self.db.execute(
+            select(func.count()).select_from(ParkingSpot).where(
+                and_(
+                    ParkingSpot.spot_type == SpotType.CIVIL,
+                    ParkingSpot.status == SpotStatus.OCCUPIED
+                )
+            )
+        )
+        civil_occupied = civil_occupied_result.scalar() or 0
+        
+        # Get military spot stats
+        military_total_result = await self.db.execute(
+            select(func.count()).select_from(ParkingSpot).where(ParkingSpot.spot_type == SpotType.MILITARY)
+        )
+        military_total = military_total_result.scalar() or 0
+        
+        military_occupied_result = await self.db.execute(
+            select(func.count()).select_from(ParkingSpot).where(
+                and_(
+                    ParkingSpot.spot_type == SpotType.MILITARY,
+                    ParkingSpot.status == SpotStatus.OCCUPIED
+                )
+            )
+        )
+        military_occupied = military_occupied_result.scalar() or 0
+        
+        # Get overflow count
+        overflow_result = await self.db.execute(
+            select(func.count()).select_from(ParkingAllocation).where(
+                and_(
+                    ParkingAllocation.overflow_to_military == True,
+                    ParkingAllocation.actual_end_time.is_(None)
+                )
+            )
+        )
+        overflow_count = overflow_result.scalar() or 0
+        
+        return {
+            "civil_total": civil_total,
+            "civil_occupied": civil_occupied,
+            "civil_available": civil_total - civil_occupied,
+            "military_total": military_total,
+            "military_occupied": military_occupied,
+            "military_available": military_total - military_occupied,
+            "overflow_count": overflow_count,
+            "occupation_rate": round((civil_occupied / civil_total * 100) if civil_total > 0 else 0, 2)
+        }
+
