@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ubuntuairlab_postgres
+    environment:
+      POSTGRES_DB: airport_db
+      POSTGRES_USER: airport_user
+      POSTGRES_PASSWORD: airport_pass
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airport_user -d airport_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airlab_network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ubuntuairlab_redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - airlab_network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ubuntuairlab_backend
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://airport_user:airport_pass@postgres:5432/airport_db
+      - REDIS_URL=redis://redis:6379/0
+      - OPENSKY_USERNAME=assounrodrigue5@gmail.com
+      - OPENSKY_PASSWORD=VotreMotDePasseOpenSky
+      - JWT_SECRET=dev-secret-key-change-in-production-minimum-32-characters
+      - AIRPORT_ICAO=DXXX
+      - USE_MOCK_AI=true
+      - ENABLE_METRICS=true
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+    networks:
+      - airlab_network
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 5 &&
+        echo 'Running migrations...' &&
+        alembic upgrade head &&
+        echo 'Initializing database...' &&
+        python init_db.py &&
+        echo 'Starting application...' &&
+        uvicorn main:app --host 0.0.0.0 --port 8000
+      "
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ubuntuairlab_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - airlab_network
+    restart: unless-stopped
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ubuntuairlab_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - airlab_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  airlab_network:
+    driver: bridge
