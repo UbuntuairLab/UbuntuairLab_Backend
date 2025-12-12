@@ -1056,11 +1056,6 @@ Ce projet est sous licence MIT.
 - Documentation API: https://air-lab.bestwebapp.tech/docs
 - Monitoring: Grafana dashboards (accès interne)
 
-**Partenaires**:
-- AIGE - Aéroport International Gnassingbé Eyadéma
-- ANAC Togo - Autorité Nationale de l'Aviation Civile
-- TAGBA - Modèles ML et IA
-
 ---
 
 **Version**: 1.0.0  
