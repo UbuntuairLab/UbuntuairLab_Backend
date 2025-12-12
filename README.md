@@ -63,20 +63,24 @@ docker-compose up -d
 
 ## Integration modeles IA
 
-Voir documentation complete: [docs/AI_INTEGRATION_GUIDE.md](docs/AI_INTEGRATION_GUIDE.md)
+**L'API ML est hébergée sur Hugging Face Space: [TAGBA/ubuntuairlab](https://tagba-ubuntuairlab.hf.space)**
 
-### Basculer vers production
+L'API fournit un **endpoint unifié `/predict`** qui retourne les prédictions des 3 modèles:
+- Model 1: ETA/ETD ajusté avec probabilités de retard
+- Model 2: Durée d'occupation du parking
+- Model 3: Détection de conflits et recommandations
 
-1. Deployer vos 3 modeles IA sur endpoints HTTP
-2. Mettre a jour .env:
+### Configuration Production
+
+Mettre à jour .env:
 ```env
 USE_MOCK_AI=false
-MODEL_ETA_ENDPOINT=https://votre-endpoint-eta.com/predict
-MODEL_OCCUPATION_ENDPOINT=https://votre-endpoint-occupation.com/predict
-MODEL_CONFLIT_ENDPOINT=https://votre-endpoint-conflit.com/predict
+ML_API_BASE_URL=https://tagba-ubuntuairlab.hf.space
+ML_API_TIMEOUT=30.0
+ML_API_MAX_RETRIES=3
 ```
 
-3. Redemarrer service
+Redémarrer le service:
 ```bash
 docker-compose restart backend
 ```

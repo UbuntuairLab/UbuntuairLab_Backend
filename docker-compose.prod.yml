@@ -37,7 +37,7 @@ services:
     image: redis:7-alpine
     container_name: ubuntuairlab_redis_prod
     restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    command: redis-server --appendonly yes
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -111,11 +111,9 @@ services:
       
       # ML Models
       - USE_MOCK_AI=${USE_MOCK_AI:-false}
-      - MODEL_ETA_ENDPOINT=${MODEL_ETA_ENDPOINT}
-      - MODEL_OCCUPATION_ENDPOINT=${MODEL_OCCUPATION_ENDPOINT}
-      - MODEL_API_KEY=${MODEL_API_KEY}
-      - MODEL_TIMEOUT_SECONDS=${MODEL_TIMEOUT_SECONDS:-30}
-      - MODEL_MAX_RETRIES=${MODEL_MAX_RETRIES:-3}
+      - ML_API_BASE_URL=${ML_API_BASE_URL:-https://tagba-ubuntuairlab.hf.space}
+      - ML_API_TIMEOUT=${ML_API_TIMEOUT:-30.0}
+      - ML_API_MAX_RETRIES=${ML_API_MAX_RETRIES:-3}
     
     ports:
       - "${API_PORT:-8000}:8000"
@@ -218,3 +216,4 @@ volumes:
     driver: local
   grafana_data:
     driver: local
+
