@@ -1,0 +1,264 @@
+graph TD
+    A[Écran d'accueil AIGE-APRON-SMART] --> B{Connexion utilisateur}
+    
+    B --> C[Champ identifiant + mot de passe]
+    C --> D{Vérification Azure AD}
+    
+    D -->|Succès| E[Chargement profil utilisateur]
+    D -->|Échec| F[Message erreur + 2 essais restants]
+    F --> B
+    
+    E --> G{Dashboard Principal}
+    
+    subgraph G [Vue principale]
+        G1[Header: Logo AIGE + Horloge temps réel]
+        G2[Sidebar navigation]
+        G3[Zone notifications/alertes]
+        G4[Widgets KPIs temps réel]
+        G5[Boutons actions rapides]
+    end
+    
+    G --> H{Sélection module}
+    
+    H --> I[MODULE RADAR LIVE]
+    H --> J[MODULE VISUALISATION 3D]
+    H --> K[MODULE GESTION POSTES]
+    H --> L[MODULE PLANIFICATION]
+    H --> M[MODULE ALERTES]
+    H --> N[MODULE HISTORIQUE]
+    
+    %% MODULE RADAR LIVE
+    I --> I1{Interface Radar}
+    
+    subgraph I1 [Écran Radar]
+        I1A[Carte interactive Leaflet/Mapbox]
+        I1B[Sidebar: listes vols]
+        I1C[Filtres: rayon, altitude, compagnie]
+        I1D[Contrôles temps réel: pause/play]
+    end
+    
+    I1 --> I2{Interaction avec vol}
+    
+    I2 -->|Clic avion| I3[Popup info vol détaillées]
+    I2 -->|Double-clic| I4[Focus + zoom sur avion]
+    I2 -->|Clic-droit| I5[Menu actions rapides]
+    
+    I3 --> I6{Actions disponibles}
+    I6 -->|Attribuer poste| K
+    I6 -->|Marquer comme traité| I7[Mise à jour statut]
+    I6 -->|Voir trajet| I8[Trajectoire historique]
+    
+    %% MODULE VISUALISATION 3D
+    J --> J1{Chargement scène 3D}
+    
+    subgraph J1 [Environnement 3D]
+        J1A[Vue aérienne aéroport]
+        J1B[Modèles avions positionnés]
+        J1C[Postes colorés selon statut]
+        J1D[Éléments météo: pluie, nuages]
+        J1E[Contrôles caméra: rotation/zoom]
+    end
+    
+    J1 --> J2{Sélection mode visualisation}
+    
+    J2 -->|Mode normal| J3[Navigation libre]
+    J2 -->|Mode prédiction IA| J4[Affichage trajectoires prédites]
+    J2 -->|Mode planification| J5[Curseur temporel]
+    J2 -->|Mode replay| J6[Sélection date historique]
+    
+    J3 --> J7{Interaction objet 3D}
+    J7 -->|Clic poste| J8[Infobulle poste + disponibilité]
+    J7 -->|Clic avion| J9[Infobulle avion + vol]
+    J7 -->|Clic zone vide| J10[Désélection]
+    
+    J8 --> J11{Actions poste}
+    J11 -->|Réserver| K
+    J11 -->|Voir historique| N
+    J11 -->|Forcer libération| J12[Confirmation + raison]
+    
+    %% MODULE GESTION POSTES
+    K --> K1{Interface gestion postes}
+    
+    subgraph K1 [Tableau de bord postes]
+        K1A[Grille 18 postes (ST-01 à ST-18)]
+        K1B[Légende couleurs: vert/rouge/orange/bleu]
+        K1C[Filtres: type, zone, statut]
+        K1D[Statistiques: taux occupation]
+        K1E[Outils: création/modification]
+    end
+    
+    K1 --> K2{Sélection poste}
+    
+    K2 -->|Clic simple| K3[Aperçu rapide informations]
+    K2 -->|Double-clic| K4[Édition détaillée poste]
+    
+    K4 --> K5{Formulaire édition}
+    
+    subgraph K5 [Attributs éditables]
+        K5A[Type: PAX/CARGO/VIP/MIL]
+        K5B[Max_code: 1-6]
+        K5C[Contraintes spécifiques]
+        K5D[Équipements disponibles]
+        K5E[Statut: LIBRE/OCCUPE/RESERVE]
+    end
+    
+    K5 --> K6{Vérification permissions}
+    
+    K6 -->|Admin/Ops| K7[Sauvegarde modifications]
+    K6 -->|ATC| K8[Accès refusé + alerte]
+    
+    K7 --> K9[Notification changement]
+    K9 --> K1
+    
+    %% MODULE PLANIFICATION
+    L --> L1{Interface planification}
+    
+    subgraph L1 [Outils planification]
+        L1A[Calendrier vue jour/semaine]
+        L1B[Timeline vols planifiés]
+        L1C[Glisser-déposer pour réaffectation]
+        L1D[Prévisions IA: retards probables]
+        L1E[Simulateur scénarios]
+    end
+    
+    L1 --> L2{Action planification}
+    
+    L2 -->|Créer vol| L3[Formulaire nouveau vol]
+    L2 -->|Modifier vol| L4[Édition vol existant]
+    L2 -->|Simuler scénario| L5[Mode simulation IA]
+    L2 -->|Exporter planning| L6[Format CSV/PDF/iCal]
+    
+    L3 --> L7{Saisie données vol}
+    
+    subgraph L7 [Champs obligatoires]
+        L7A[Callsign + type avion]
+        L7B[Nature: PAX/CARGO/VIP/MIL]
+        L7C[Horaires: ETA + ETD]
+        L7D[Compagnie + origine/destination]
+    end
+    
+    L7 --> L8{Validation IA}
+    
+    L8 -->|Propositions IA| L9[Affichage suggestions]
+    L8 -->|Conflits détectés| L10[Alerte + alternatives]
+    
+    L9 --> L11{Choix utilisateur}
+    L11 -->|Accepter IA| L12[Validation automatique]
+    L11 -->|Modifier manuellement| L13[Ajustement manuel]
+    
+    %% MODULE ALERTES
+    M --> M1{Dashboard alertes}
+    
+    subgraph M1 [Gestionnaire alertes]
+        M1A[Liste alertes triées par criticité]
+        M1B[Filtres: type, statut, période]
+        M1C[Préférences notifications]
+        M1D[Historique alertes traitées]
+    end
+    
+    M1 --> M2{Sélection alerte}
+    
+    M2 -->|Clic alerte| M3[Détails alerte + contexte]
+    M2 -->|Actions groupe| M4[Marquer tout comme lu]
+    
+    M3 --> M5{Actions sur alerte}
+    
+    M5 -->|Reconnaître| M6[Marquer comme traitée]
+    M5 -->|Escalader| M7[Transfert autre utilisateur]
+    M5 -->|Ignorer| M8[Archiver avec raison]
+    M5 -->|Créer tâche| M9[Création ticket suivi]
+    
+    M6 --> M10[Notification résolution]
+    M10 --> M1
+    
+    %% MODULE HISTORIQUE
+    N --> N1{Interface historique}
+    
+    subgraph N1 [Recherche avancée]
+        N1A[Filtres: date, poste, vol, compagnie]
+        N1B[Recherche texte: callsign, etc.]
+        N1C[Options d'export: CSV, PDF, Excel]
+        N1D[Visualisations: graphiques, stats]
+        N1E[Comparaisons périodes]
+    end
+    
+    N1 --> N2{Lancement recherche}
+    
+    N2 -->|Recherche simple| N3[Affichage résultats]
+    N2 -->|Recherche complexe| N4[Traitement en arrière-plan]
+    
+    N3 --> N5{Actions sur résultats}
+    
+    N5 -->|Exporter| N6[Sélection format + options]
+    N5 -->|Voir détails| N7[Fiche détaillée]
+    N5 -->|Comparer| N8[Comparaison multi-critères]
+    
+    N6 --> N9{Génération rapport}
+    N9 -->|CSV| N10[Téléchargement direct]
+    N9 -->|PDF| N11[Génération + prévisualisation]
+    N9 -->|Excel| N12[Fichier structuré]
+    
+    %% NAVIGATION ET ACTIONS GLOBALES
+    G --> O{Actions globales}
+    
+    O -->|Notifications| P[Liste notifications temps réel]
+    O -->|Recherche| Q[Recherche globale]
+    O -->|Profil| R[Menu utilisateur]
+    O -->|Aide| S[Centre d'aide + documentation]
+    
+    P --> P1{Actions notification}
+    P1 -->|Voir| P2[Accès contexte]
+    P1 -->|Ignorer| P3[Marquer comme lu]
+    
+    R --> R1{Options profil}
+    R1 -->|Déconnexion| R2[Confirmation + retour login]
+    R1 -->|Préférences| R3[Paramètres utilisateur]
+    R1 -->|Changer mot de passe| R4[Formulaire changement]
+    
+    S --> S1{Ressources aide}
+    S1 -->|Guide utilisateur| S2[Documentation interactive]
+    S1 -->|Tutoriels vidéo| S3[Bibliothèque vidéos]
+    S1 -->|Contact support| S4[Formulaire ticket]
+    
+    %% FLUX TEMPS RÉEL ET WEBSOCKETS
+    T[WebSocket Service] --> U{Mise à jour temps réel}
+    
+    U -->|Nouveau vol détecté| V[Notification + mise à jour carte]
+    U -->|Changement statut poste| W[Update couleur grille postes]
+    U -->|Alerte météo| X[Popup alerte + modification affichage]
+    U -->|Message système| Y[Bandeau notification système]
+    
+    V --> G
+    W --> K1
+    X --> M1
+    Y --> G
+    
+    %% MODE DÉGRADÉ
+    Z[Détection perte connexion] --> AA{Activation mode dégradé}
+    
+    AA -->|Connexion API perdue| AB[Interface données locales]
+    AA -->|Connexion base perdue| AC[Mode lecture seule]
+    AA -->|Rétablissement| AD[Re-synchronisation automatique]
+    
+    AB --> AE{Fonctionnalités disponibles}
+    AE -->|Visualisation 3D| AF[Scène locale dernière version]
+    AE -->|Gestion postes| AG[Modifications locales]
+    AE -->|Historique| AH[Données en cache]
+    
+    AD --> AI[Synchronisation incrémentielle]
+    AI --> AJ[Notification reprise normale]
+    AJ --> G
+    
+    %% FIN DE SESSION
+    AK[Inactivité détectée] --> AL{Timer session}
+    
+    AL -->|15 min inactivité| AM[Popup prolongation session]
+    AL -->|30 min inactivité| AN[Déconnexion automatique]
+    
+    AM --> AO{Choix utilisateur}
+    AO -->|Prolonger| AP[Réinitialisation timer]
+    AO -->|Déconnecter| AQ[Déconnexion immédiate]
+    
+    AP --> G
+    AN --> A
+    AQ --> A
