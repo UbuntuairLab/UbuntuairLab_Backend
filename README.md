@@ -1,4 +1,4 @@
-# UbuntuAirLab Backend - AIGE APRON-SMART
+# UbuntuAirLab
 
 **Système intelligent de gestion de l'aire de stationnement de l'Aéroport International Gnassingbé Eyadéma**
 
@@ -1052,9 +1052,7 @@ Ce projet est sous licence MIT.
 
 ## Support et Contact
 
-**Équipe UbuntuAirLab - AIGE APRON-SMART**
-
-- Email support: support@ubuntuairlab.com
+**Équipe UbuntuAirLab**
 - Documentation API: https://air-lab.bestwebapp.tech/docs
 - Monitoring: Grafana dashboards (accès interne)
 
@@ -1065,6 +1063,6 @@ Ce projet est sous licence MIT.
 
 ---
 
-**Version**: 2.0.0  
+**Version**: 1.0.0  
 **Dernière mise à jour**: 12 Décembre 2025  
 **Déploiement**: https://air-lab.bestwebapp.tech
