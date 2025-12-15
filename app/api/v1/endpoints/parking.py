@@ -395,7 +395,6 @@ async def military_transfer(
             flight_icao24=flight.icao24,
             spot_id=military_spots[0].spot_id,
             predicted_duration_minutes=predicted_minutes,
-            predicted_start_time=datetime.now(timezone.utc),
             predicted_end_time=datetime.now(timezone.utc) + timedelta(minutes=predicted_minutes),
             overflow_to_military=True,
             overflow_reason=f"Admin decision: {request.reason}"

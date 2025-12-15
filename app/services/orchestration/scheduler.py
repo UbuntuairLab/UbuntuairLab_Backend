@@ -58,6 +58,17 @@ class FlightSyncScheduler:
             misfire_grace_time=120
         )
         
+        # Add departure monitoring job (every 3 minutes)
+        self._departure_job = self.scheduler.add_job(
+            self._departure_monitoring_job,
+            trigger=IntervalTrigger(minutes=3),
+            id="departure_monitoring_job",
+            name="Departure Monitoring",
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=180
+        )
+        
         self.scheduler.start()
         self._is_running = True
         
@@ -65,6 +76,7 @@ class FlightSyncScheduler:
             f"Flight sync scheduler started with {self.interval_minutes}min interval"
         )
         logger.info("Civil recall scheduler started with 2min interval")
+        logger.info("Departure monitoring scheduler started with 3min interval")
     
     async def stop(self):
         """Stop the scheduler"""
@@ -122,7 +134,7 @@ class FlightSyncScheduler:
                     # Get flight
                     from app.models.flight import Flight
                     flight_result = await db.execute(
-                        select(Flight).where(Flight.icao24 == allocation.icao24)
+                        select(Flight).where(Flight.icao24 == allocation.flight_icao24)
                     )
                     flight = flight_result.scalar_one_or_none()
                     
@@ -134,9 +146,10 @@ class FlightSyncScheduler:
                         flight.aircraft_type or "A320"
                     )
                     
-                    available_civil = await spot_repo.find_available_civil_spots(
-                        aircraft_size=aircraft_size,
-                        limit=1
+                    from app.models.parking import SpotType
+                    available_civil = await spot_repo.get_available_by_type(
+                        spot_type=SpotType.CIVIL,
+                        aircraft_size=aircraft_size
                     )
                     
                     if available_civil:
@@ -160,6 +173,90 @@ class FlightSyncScheduler:
                     
             except Exception as e:
                 logger.error(f"Error in civil recall job: {str(e)}", exc_info=True)
+            finally:
+                await db.close()
+    
+    async def _departure_monitoring_job(self):
+        """
+        Monitor for completed/departed flights and release their parking spots.
+        Runs every 3 minutes.
+        """
+        async with AsyncSessionLocal() as db:
+            try:
+                logger.info("Executing departure monitoring check")
+                
+                from app.models.flight import Flight, FlightStatus
+                from app.models.parking import ParkingAllocation, ParkingSpot, SpotStatus
+                from app.repositories.parking_repository import ParkingAllocationRepository, ParkingSpotRepository
+                from app.repositories.flight_repository import FlightRepository
+                from app.services.notifications.notification_service import NotificationService
+                from sqlalchemy import select, and_
+                from datetime import datetime, timezone
+                
+                allocation_repo = ParkingAllocationRepository(db)
+                spot_repo = ParkingSpotRepository(db)
+                flight_repo = FlightRepository(db)
+                notification_service = NotificationService(db)
+                
+                # Find active allocations with completed/departed flights
+                result = await db.execute(
+                    select(ParkingAllocation, Flight)
+                    .join(Flight, Flight.icao24 == ParkingAllocation.flight_icao24)
+                    .where(
+                        and_(
+                            ParkingAllocation.actual_end_time.is_(None),  # Still active
+                            Flight.status == FlightStatus.COMPLETED  # Flight completed/departed
+                        )
+                    )
+                )
+                completed_allocations = result.all()
+                
+                released_count = 0
+                for allocation, flight in completed_allocations:
+                    try:
+                        # Calculate actual duration
+                        actual_start = allocation.allocated_at
+                        actual_end = datetime.now(timezone.utc)
+                        actual_duration = int((actual_end - actual_start).total_seconds() / 60)
+                        
+                        # Complete the allocation
+                        await allocation_repo.complete_allocation(
+                            allocation_id=allocation.allocation_id,
+                            actual_start_time=actual_start,
+                            actual_end_time=actual_end,
+                            actual_duration_minutes=actual_duration
+                        )
+                        
+                        # Release the parking spot
+                        await spot_repo.update_status(allocation.spot_id, SpotStatus.AVAILABLE)
+                        
+                        # Clear flight parking assignment
+                        await flight_repo.update_parking_assignment(flight.icao24, None)
+                        
+                        # Create notification
+                        await notification_service.create_parking_freed(
+                            flight_icao24=flight.icao24,
+                            spot_id=allocation.spot_id
+                        )
+                        
+                        logger.info(
+                            f"Released parking spot {allocation.spot_id} for departed flight {flight.callsign} "
+                            f"(duration: {actual_duration}min)"
+                        )
+                        released_count += 1
+                        
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to release spot for flight {flight.icao24}: {str(e)}"
+                        )
+                
+                if released_count > 0:
+                    logger.info(f"Departure monitoring completed: {released_count} spots released")
+                else:
+                    logger.debug("Departure monitoring check: No spots to release")
+                    
+            except Exception as e:
+                logger.error(f"Error in departure monitoring job: {str(e)}", exc_info=True)
             finally:
                 await db.close()
     

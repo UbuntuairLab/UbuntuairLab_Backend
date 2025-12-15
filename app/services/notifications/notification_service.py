@@ -59,11 +59,11 @@ class NotificationService:
         flight_repo = FlightRepository(self.db)
         
         # Get a recent flight for context
-        flights = await flight_repo.list(skip=0, limit=1)
-        if not flights[0]:
+        flights, total = await flight_repo.list_flights(skip=0, limit=1)
+        if not flights:
             return
         
-        recent_flight = flights[0][0]
+        recent_flight = flights[0]
         
         message = (
             f"Alerte saturation parking: {occupation_rate:.1f}% occupé. "

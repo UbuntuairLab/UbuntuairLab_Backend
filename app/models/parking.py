@@ -121,6 +121,7 @@ class ParkingAllocation(Base):
     def __repr__(self):
         return f"<ParkingAllocation(id={self.allocation_id}, flight={self.flight_icao24}, spot={self.spot_id})>"
     
+    @property
     def is_active(self) -> bool:
         """Check if allocation is currently active"""
         return self.actual_end_time is None

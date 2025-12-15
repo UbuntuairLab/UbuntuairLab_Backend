@@ -43,50 +43,6 @@ class ParkingService:
         self.flight_repo = FlightRepository(db)
         self.notification_service = NotificationService(db)
     
-    def find_available_civil_spots(
-        self,
-        aircraft_size: str,
-        requires_jetway: bool = True
-    ) -> List[dict]:
-        """
-        Find available civil parking spots matching requirements.
-        
-        Args:
-            aircraft_size: Aircraft size category (small/medium/large)
-            requires_jetway: Whether aircraft needs jetway access
-        
-        Returns:
-            List of available spot dictionaries
-        
-        Note:
-            This is a placeholder. Will be replaced with database queries.
-        """
-        # TODO: Implement with database repository
-        logger.debug(
-            f"Searching civil spots for {aircraft_size} aircraft, jetway={requires_jetway}"
-        )
-        return []
-    
-    def find_available_military_spots(
-        self,
-        aircraft_size: str
-    ) -> List[dict]:
-        """
-        Find available military parking spots for overflow.
-        
-        Args:
-            aircraft_size: Aircraft size category
-        
-        Returns:
-            List of available military spot dictionaries
-        
-        Note:
-            This is a placeholder. Will be replaced with database queries.
-        """
-        # TODO: Implement with database repository
-        logger.debug(f"Searching military spots for {aircraft_size} aircraft")
-        return []
-    
     async def allocate_spot(
         self,
         flight: Flight,
@@ -122,6 +78,12 @@ class ParkingService:
         if conflict_data:
             conflict_probability = conflict_data.get("risque_conflit", 0.0)
             conflict_detected = conflict_probability > 0.5
+            
+            # Log conflict detection
+            if conflict_detected:
+                logger.warning(
+                    f"High conflict probability ({conflict_probability:.2%}) detected for flight {flight.icao24}"
+                )
         
         # Try civil spots first
         civil_spots = await self.spot_repo.get_available_by_type(
@@ -149,6 +111,14 @@ class ParkingService:
             
             # Update flight parking assignment
             await self.flight_repo.update_parking_assignment(flight.icao24, best_spot.spot_id)
+            
+            # Create conflict notification if detected
+            if conflict_detected:
+                await self.notification_service.create_conflict_notification(
+                    flight_icao24=flight.icao24,
+                    spot_id=best_spot.spot_id,
+                    conflict_probability=conflict_probability
+                )
             
             logger.info(f"Allocated civil spot {best_spot.spot_id} for flight {flight.icao24}")
             
@@ -202,7 +172,57 @@ class ParkingService:
         # No automatic military assignment for new flights - require admin decision
         logger.error(
             f"Complete civil saturation for flight {flight.icao24}. "
-            f"No automatic transfer possible. Admin intervention required."
+            f"No automatic transfer possible. Attempting direct military overflow.\
+"
+        )
+        
+        # Get available military spots
+        military_spots = await self.spot_repo.get_available_by_type(
+            spot_type=SpotType.MILITARY,
+            aircraft_size=aircraft_size
+        )
+        
+        if military_spots:
+            military_spot = military_spots[0]
+            
+            # Allocate to military
+            allocation = await self.allocation_repo.create(
+                flight_icao24=flight.icao24,
+                spot_id=military_spot.spot_id,
+                predicted_duration_minutes=predicted_occupation_minutes,
+                predicted_end_time=predicted_end_time,
+                overflow_to_military=True,
+                overflow_reason="Civil parking full - automatic military overflow",
+                conflict_detected=conflict_detected,
+                conflict_probability=conflict_probability
+            )
+            
+            await self.spot_repo.update_status(military_spot.spot_id, SpotStatus.OCCUPIED)
+            await self.flight_repo.update_parking_assignment(flight.icao24, military_spot.spot_id)
+            
+            # Create overflow notification
+            await self.notification_service.create_overflow_notification(
+                flight_icao24=flight.icao24,
+                spot_id=military_spot.spot_id,
+                reason="Civil parking saturated - automatic overflow"
+            )
+            
+            logger.info(
+                f"Flight {flight.icao24} allocated to military overflow spot {military_spot.spot_id}"
+            )
+            
+            return ParkingAllocationResult(
+                success=True,
+                spot=military_spot,
+                allocation=allocation,
+                overflow_to_military=True,
+                reason="Allocated to military parking (civil full)"
+            )
+        
+        # Complete saturation - no spots available anywhere
+        logger.error(
+            f"Complete saturation for flight {flight.icao24}. "
+            f"No civil or military spots available."
         )
         
         # Create alert notification for admin
@@ -213,7 +233,7 @@ class ParkingService:
         
         return ParkingAllocationResult(
             success=False,
-            reason="Complete civil saturation - no automatic solution available. Admin must manually assign to military or reschedule."
+            reason="Complete parking saturation - no spots available (civil and military full). Admin intervention required."
         )
     
     
