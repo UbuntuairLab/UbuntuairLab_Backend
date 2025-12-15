@@ -196,3 +196,69 @@ class FlightRepository:
         else:
             # Create new flight
             return await self.create(flight_data)
+    
+    async def update_realtime_position(
+        self,
+        icao24: str,
+        state_vector: "StateVectorData"
+    ) -> Optional[Flight]:
+        """
+        Update flight with real-time position data from OpenSky state vector.
+        
+        Args:
+            icao24: Aircraft ICAO24 address
+            state_vector: StateVectorData from OpenSky
+        
+        Returns:
+            Updated Flight object or None if not found
+        """
+        flight = await self.get_by_icao24(icao24)
+        
+        if not flight:
+            return None
+        
+        # Update real-time tracking fields
+        flight.longitude = state_vector.longitude
+        flight.latitude = state_vector.latitude
+        flight.baro_altitude = state_vector.baro_altitude
+        flight.geo_altitude = state_vector.geo_altitude
+        flight.velocity = state_vector.velocity
+        flight.heading = state_vector.heading
+        flight.vertical_rate = state_vector.vertical_rate
+        flight.on_ground = 1 if state_vector.on_ground else 0
+        flight.last_position_update = datetime.fromtimestamp(state_vector.last_contact) if state_vector.last_contact else None
+        
+        await self.db.commit()
+        await self.db.refresh(flight)
+        
+        return flight
+    
+    async def get_flights_needing_position_update(
+        self,
+        max_age_seconds: int = 300
+    ) -> List[Flight]:
+        """
+        Get active flights that need position update (>5min since last update).
+        
+        Args:
+            max_age_seconds: Maximum age of last position update (default 5min)
+        
+        Returns:
+            List of flights needing update
+        """
+        from datetime import datetime, timedelta
+        
+        cutoff_time = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+        
+        query = select(Flight).where(
+            and_(
+                Flight.status.in_(["scheduled", "active"]),
+                or_(
+                    Flight.last_position_update == None,
+                    Flight.last_position_update < cutoff_time
+                )
+            )
+        )
+        
+        result = await self.db.execute(query)
+        return list(result.scalars().all())

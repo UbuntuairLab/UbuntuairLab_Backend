@@ -21,6 +21,16 @@ class FlightResponse(BaseModel):
     predicted_etd: Optional[datetime] = None
     predicted_delay_minutes: Optional[int] = None
     predicted_occupation_minutes: Optional[int] = None
+    
+    # Real-time tracking fields
+    longitude: Optional[float] = None
+    latitude: Optional[float] = None
+    altitude: Optional[float] = None  # baro_altitude
+    velocity: Optional[float] = None  # m/s
+    heading: Optional[float] = None
+    on_ground: Optional[bool] = None
+    last_position_update: Optional[datetime] = None
+    
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     est_departure_time: Optional[str] = None  # For future flights

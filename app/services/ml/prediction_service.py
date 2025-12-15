@@ -13,6 +13,7 @@ from app.repositories.prediction_repository import PredictionRepository
 from app.repositories.turnaround_repository import TurnaroundRepository
 from app.models.prediction import ModelType
 from app.models.flight import Flight
+from app.services.business.traffic_stats_service import get_traffic_statistics, get_weather_data, get_historical_data
 
 logger = logging.getLogger(__name__)
 
@@ -73,40 +74,72 @@ class MLPredictionService:
     async def _build_ml_input(self, flight: Flight) -> Dict:
         """
         Build ML API input from flight data.
-        Uses defaults for missing values and real airport capacity (17 parking spots).
+        Uses REAL data from weather, traffic stats, historical, and real-time tracking.
         """
-        # Get turnaround time for aircraft type
-        aircraft_type = "A320"  # Default, could be extracted from flight data
-        turnaround_rule = await self.turnaround_repo.get_by_aircraft_type(aircraft_type)
-        avg_turnaround = turnaround_rule.avg_turnaround_minutes if turnaround_rule else 60
+        from app.utils.geo_calculator import (
+            calculate_distance_to_airport,
+            meters_per_second_to_kmh
+        )
         
-        # Default values (can be enhanced with real-time data)
+        # Get REAL weather data
+        weather = await get_weather_data()
+        
+        # Get REAL traffic statistics
+        traffic = await get_traffic_statistics(self.db)
+        
+        # Get REAL historical data for this flight
+        historical = await get_historical_data(self.db, flight)
+        
+        # Extract airline from callsign
+        airline = historical.get("airline", "UNKNOWN")
+        
+        # REAL-TIME TRACKING DATA (from OpenSky state vectors)
+        # Convert velocity from m/s to km/h for ML API
+        velocity_kmh = meters_per_second_to_kmh(flight.velocity) if flight.velocity else 250.0
+        
+        # Use barometric altitude or default
+        altitude_m = flight.baro_altitude if flight.baro_altitude else 3500.0
+        
+        # Calculate distance to runway if position available
+        distance_km = calculate_distance_to_airport(flight.latitude, flight.longitude)
+        if distance_km is None:
+            distance_km = 20.0  # Fallback default
+        
+        # Build input with REAL DATA
         return {
             "callsign": flight.callsign or "",
             "icao24": flight.icao24,
-            "vitesse_actuelle": 250.0,  # Default cruise speed
-            "altitude": 3500.0,  # Default approach altitude
-            "distance_piste": 20.0,  # Default distance
-            "temperature": 20.0,
-            "vent_vitesse": 10.0,
-            "vent_direction": 180.0,
-            "visibilite": 10.0,
-            "pluie": 0.0,
-            "compagnie": self._extract_airline(flight.callsign or ""),
-            "retard_historique_compagnie": 5.0,
-            "trafic_approche": 3,
-            "occupation_tarmac": 0.5,
-            "type_avion": "A320",  # Default aircraft type
-            "historique_occupation_avion": 45.0,
+            "vitesse_actuelle": velocity_kmh,  # Real-time velocity (km/h)
+            "altitude": altitude_m,  # Real-time altitude (meters)
+            "distance_piste": distance_km,  # Calculated distance (km)
+            
+            # REAL WEATHER DATA
+            "temperature": weather.get("temperature", 20.0),
+            "vent_vitesse": weather.get("wind_speed", 10.0),
+            "vent_direction": weather.get("wind_direction", 180.0),
+            "visibilite": weather.get("visibility", 10.0),
+            "pluie": weather.get("rain", 0.0),
+            "meteo_score": weather.get("score", 0.8),
+            
+            # REAL AIRLINE/HISTORICAL DATA
+            "compagnie": airline,
+            "retard_historique_compagnie": historical.get("avg_delay", 5.0),
+            "type_avion": historical.get("aircraft_type", "A320"),
+            "historique_occupation_avion": historical.get("avg_occupation_time", 45.0),
+            "passagers_estimes": historical.get("passengers", 150),
+            
+            # REAL TRAFFIC DATA
+            "trafic_approche": traffic.get("approaching", 0),
+            "occupation_tarmac": traffic.get("tarmac_occupation", 0.0),
+            "disponibilite_emplacements": traffic.get("available_spots", 17),
+            "occupation_actuelle": traffic.get("current_occupation", 0.0),
+            "trafic_entrant": traffic.get("incoming", 0),
+            "trafic_sortant": traffic.get("outgoing", 0),
+            "emplacements_futurs_libres": traffic.get("future_free_spots", 17),
+            
+            # Flight metadata
             "type_vol": 0 if flight.flight_type.value == "arrival" else 1,
-            "passagers_estimes": 150,
-            "disponibilite_emplacements": 17,  # REAL: 17 parking spots total
-            "occupation_actuelle": 0.6,
-            "meteo_score": 0.8,
-            "trafic_entrant": 5,
-            "trafic_sortant": 4,
-            "priorite_vol": 0,
-            "emplacements_futurs_libres": 5,  # Estimate: ~30% free
+            "priorite_vol": 0,  # Default priority (could be enhanced with business rules)
             "heure_jour": datetime.now().hour,
             "jour_semaine": datetime.now().weekday(),
             "periode_annee": datetime.now().month

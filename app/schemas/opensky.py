@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, validator
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from enum import Enum
 
@@ -8,6 +8,63 @@ class FlightType(str, Enum):
     """Type of flight operation"""
     ARRIVAL = "arrival"
     DEPARTURE = "departure"
+
+
+class StateVectorData(BaseModel):
+    """
+    Schema for OpenSky Network state vector (real-time position data).
+    Represents current position and state of an aircraft.
+    """
+    icao24: str = Field(..., description="Unique ICAO 24-bit address")
+    callsign: Optional[str] = Field(None, description="Aircraft callsign")
+    origin_country: str = Field(..., description="Country inferred from ICAO24")
+    time_position: Optional[int] = Field(None, description="Unix timestamp of position update")
+    last_contact: int = Field(..., description="Unix timestamp of last contact")
+    longitude: Optional[float] = Field(None, description="Longitude in decimal degrees")
+    latitude: Optional[float] = Field(None, description="Latitude in decimal degrees")
+    baro_altitude: Optional[float] = Field(None, description="Barometric altitude in meters")
+    geo_altitude: Optional[float] = Field(None, description="Geometric altitude in meters")
+    on_ground: bool = Field(..., description="Aircraft is on ground")
+    velocity: Optional[float] = Field(None, description="Ground speed in m/s")
+    heading: Optional[float] = Field(None, description="True track heading in degrees")
+    vertical_rate: Optional[float] = Field(None, description="Vertical rate in m/s")
+    squawk: Optional[str] = Field(None, description="Transponder code")
+    category: Optional[int] = Field(None, description="Aircraft category (if extended=1)")
+    
+    @validator('icao24')
+    def validate_icao24(cls, v):
+        """Ensure ICAO24 is lowercase hex string"""
+        if v:
+            return v.lower().strip()
+        return v
+    
+    @validator('callsign')
+    def validate_callsign(cls, v):
+        """Clean up callsign"""
+        if v:
+            return v.strip()
+        return v
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "icao24": "3c6444",
+                "callsign": "AFR123",
+                "origin_country": "France",
+                "time_position": 1702210500,
+                "last_contact": 1702210502,
+                "longitude": 1.3,
+                "latitude": 6.2,
+                "baro_altitude": 2800.0,
+                "geo_altitude": 2850.0,
+                "on_ground": False,
+                "velocity": 75.5,
+                "heading": 245.0,
+                "vertical_rate": -5.2,
+                "squawk": "1000",
+                "category": 3
+            }
+        }
 
 
 class FlightData(BaseModel):
@@ -101,5 +158,21 @@ class OpenSkyResponse(BaseModel):
                 "flights": [],
                 "total_count": 0,
                 "timestamp": "2025-12-10T10:30:00Z"
+            }
+        }
+
+
+class StateVectorResponse(BaseModel):
+    """Response wrapper for OpenSky state vectors"""
+    states: List[StateVectorData]
+    total_count: int
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "states": [],
+                "total_count": 0,
+                "timestamp": "2025-12-15T10:30:00Z"
             }
         }

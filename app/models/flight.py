@@ -59,6 +59,17 @@ class Flight(Base):
     predicted_delay_minutes = Column(Integer, nullable=True, doc="Predicted delay in minutes")
     predicted_occupation_minutes = Column(Integer, nullable=True, doc="Predicted parking duration")
     
+    # Real-time tracking (OpenSky state vectors)
+    longitude = Column(Float, nullable=True, doc="Current longitude (decimal degrees)")
+    latitude = Column(Float, nullable=True, doc="Current latitude (decimal degrees)")
+    baro_altitude = Column(Float, nullable=True, doc="Barometric altitude (meters)")
+    geo_altitude = Column(Float, nullable=True, doc="Geometric altitude (meters)")
+    velocity = Column(Float, nullable=True, doc="Ground speed (m/s)")
+    heading = Column(Float, nullable=True, doc="True track heading (degrees)")
+    vertical_rate = Column(Float, nullable=True, doc="Vertical rate (m/s)")
+    on_ground = Column(Integer, nullable=True, doc="Aircraft on ground (0/1)")
+    last_position_update = Column(DateTime(timezone=True), nullable=True, doc="Last state vector update")
+    
     # Metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now(), doc="Record creation timestamp")
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), doc="Record update timestamp")
@@ -68,6 +79,8 @@ class Flight(Base):
         Index('idx_flight_status_type', 'status', 'flight_type'),
         Index('idx_flight_airports', 'departure_airport', 'arrival_airport'),
         Index('idx_flight_timestamps', 'first_seen', 'last_seen'),
+        Index('idx_flight_position', 'latitude', 'longitude'),
+        Index('idx_flight_last_position_update', 'last_position_update'),
     )
     
     # Relationships

@@ -6,8 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.services.external.opensky_client import OpenSkyClient
+from app.services.external.aviationstack_client import AviationStackClient
 from app.services.ml.prediction_service import MLPredictionService
 from app.services.business.parking_service import ParkingService
+from app.services.converters.aviationstack_converter import AviationStackConverter
 from app.repositories.flight_repository import FlightRepository
 from app.schemas.opensky import FlightData, FlightType
 from app.models.flight import FlightStatus, FlightType as FlightTypeEnum
@@ -26,11 +28,16 @@ class FlightOrchestrator:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.opensky_client = OpenSkyClient()
+        self.aviationstack_client = AviationStackClient()
         self.ml_service = MLPredictionService(db)
         self.parking_service = ParkingService(db)
         self.flight_repo = FlightRepository(db)
         self.airport_icao = settings.AIRPORT_ICAO
         self.lookback_hours = settings.SYNC_LOOKBACK_HOURS
+        
+        # Track last AviationStack usage (rate limit: 1 req/60s, but use 12h cooldown to be conservative)
+        self._last_aviationstack_call: Optional[datetime] = None
+        self._aviationstack_cooldown_seconds = 43200  # 12 hours = 43200 seconds
     
     async def initialize(self):
         """Initialize dependencies"""
@@ -55,6 +62,7 @@ class FlightOrchestrator:
     async def sync_flights(self) -> dict:
         """
         Main synchronization method: fetch flights from OpenSky and process them.
+        Falls back to AviationStack if OpenSky is rate-limited.
         This is called by the scheduler at regular intervals.
         
         Returns:
@@ -63,9 +71,11 @@ class FlightOrchestrator:
         logger.info("Starting flight synchronization")
         
         begin, end = self._get_time_window()
+        flights = []
+        source = "OpenSky"
         
         try:
-            # Fetch arrivals and departures
+            # Try OpenSky first
             async with self.opensky_client:
                 response = await self.opensky_client.get_arrivals_and_departures(
                     airport_icao=self.airport_icao,
@@ -76,39 +86,63 @@ class FlightOrchestrator:
             
             flights = response.flights
             logger.info(
-                f"Retrieved {len(flights)} civilian flights for {self.airport_icao}",
+                f"Retrieved {len(flights)} civilian flights from OpenSky for {self.airport_icao}",
                 extra={"begin": begin, "end": end}
             )
             
-            # Process flights in batches
+        except OpenSkyAPIException as e:
+            # OpenSky failed - try AviationStack fallback
+            logger.warning(f"OpenSky API error: {str(e)} - Attempting AviationStack fallback")
+            
+            if self._can_use_aviationstack():
+                try:
+                    flights = await self._fetch_from_aviationstack()
+                    source = "AviationStack"
+                    logger.info(
+                        f"Retrieved {len(flights)} flights from AviationStack fallback"
+                    )
+                except Exception as av_error:
+                    logger.error(f"AviationStack fallback also failed: {str(av_error)}")
+                    return {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "error": f"OpenSky: {str(e)}, AviationStack: {str(av_error)}",
+                        "total_flights": 0,
+                        "successful": 0,
+                        "failed": 0,
+                        "source": "none"
+                    }
+            else:
+                logger.error("Cannot use AviationStack fallback - rate limit cooldown active")
+                return {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "error": str(e),
+                    "total_flights": 0,
+                    "successful": 0,
+                    "failed": 0,
+                    "source": "OpenSky (failed)"
+                }
+        
+        # Process flights if we got any
+        if flights:
             results = await self._process_flights_batch(flights)
             
             # Compile statistics
             stats = {
                 "timestamp": datetime.utcnow().isoformat(),
+                "source": source,
                 "total_flights": len(flights),
                 "successful": results["successful"],
                 "failed": results["failed"],
                 "errors": results["errors"]
             }
             
-            logger.info("Flight synchronization completed", extra=stats)
+            logger.info(f"Flight synchronization completed from {source}", extra=stats)
             return stats
-            
-        except OpenSkyAPIException as e:
-            logger.error(f"OpenSky API error during sync: {str(e)}")
+        else:
+            logger.warning("No flights retrieved from any source")
             return {
                 "timestamp": datetime.utcnow().isoformat(),
-                "error": str(e),
-                "total_flights": 0,
-                "successful": 0,
-                "failed": 0
-            }
-        except Exception as e:
-            logger.error(f"Unexpected error during sync: {str(e)}")
-            return {
-                "timestamp": datetime.utcnow().isoformat(),
-                "error": str(e),
+                "source": source,
                 "total_flights": 0,
                 "successful": 0,
                 "failed": 0
@@ -243,3 +277,175 @@ class FlightOrchestrator:
                 exc_info=True
             )
             return False
+    
+    def _can_use_aviationstack(self) -> bool:
+        """
+        Check if AviationStack API can be used (respects rate limit).
+        
+        Returns:
+            True if enough time has passed since last call (12h cooldown)
+        """
+        if self._last_aviationstack_call is None:
+            return True
+        
+        elapsed = (datetime.utcnow() - self._last_aviationstack_call).total_seconds()
+        can_use = elapsed >= self._aviationstack_cooldown_seconds
+        
+        if not can_use:
+            remaining_hours = (self._aviationstack_cooldown_seconds - elapsed) / 3600
+            logger.warning(
+                f"AviationStack rate limit cooldown: {remaining_hours:.1f}h remaining (12h policy)"
+            )
+        
+        return can_use
+    
+    async def _fetch_from_aviationstack(self) -> List[FlightData]:
+        """
+        Fetch today's flights from AviationStack API and convert to FlightData format.
+        Uses timetable endpoint for current day arrivals and departures.
+        
+        Returns:
+            List of FlightData objects converted from AviationStack
+        
+        Raises:
+            Exception: If AviationStack API call fails
+        """
+        logger.info("Fetching flights from AviationStack (fallback mode)")
+        
+        # Mark usage time BEFORE call to prevent concurrent calls
+        self._last_aviationstack_call = datetime.utcnow()
+        
+        try:
+            async with self.aviationstack_client:
+                # Fetch arrivals for today
+                arrivals = await self.aviationstack_client.get_timetable(
+                    airport_iata=settings.AIRPORT_IATA,  # LFW
+                    timetable_type="arrival"
+                )
+                
+                # Convert to FlightData format
+                flight_data_list = AviationStackConverter.batch_convert(
+                    av_flights=arrivals.data if hasattr(arrivals, 'data') else [],
+                    flight_type="arrival"
+                )
+                
+                logger.info(
+                    f"AviationStack: Retrieved {len(flight_data_list)} arrivals"
+                )
+                
+                return flight_data_list
+                
+        except Exception as e:
+            logger.error(f"AviationStack fetch failed: {str(e)}")
+            # Reset timer on failure to allow retry sooner
+            self._last_aviationstack_call = None
+            raise
+    
+    async def sync_realtime_positions(self) -> dict:
+        """
+        Fetch real-time state vectors from OpenSky for aircraft near DXXX (Lomé).
+        Updates position, velocity, altitude, and heading for active flights.
+        
+        Uses bounding box of ~60km radius around airport to capture:
+        - Approaching aircraft (within 60km final approach)
+        - Departing aircraft (within 60km after takeoff)
+        - Aircraft in holding patterns
+        
+        Returns:
+            dict: Summary of sync operation (updated_count, total_states, errors)
+        """
+        from app.utils.geo_calculator import get_bounding_box, AIRPORT_COORDS
+        
+        logger.info("🛰️ Starting real-time position sync from OpenSky state vectors")
+        
+        try:
+            # Get bounding box for 60km radius around DXXX (Lomé)
+            # AIRPORT_COORDS = (6.165611, 1.254797)
+            lat_min, lat_max, lon_min, lon_max = get_bounding_box(
+                center_lat=AIRPORT_COORDS[0],
+                center_lon=AIRPORT_COORDS[1],
+                radius_km=60.0
+            )
+            
+            logger.info(
+                f"Fetching state vectors in area: "
+                f"lat({lat_min:.4f} to {lat_max:.4f}), "
+                f"lon({lon_min:.4f} to {lon_max:.4f})"
+            )
+            
+            # Fetch raw state vectors from OpenSky
+            raw_states = await self.opensky_client.get_states_in_area(
+                lamin=lat_min,
+                lamax=lat_max,
+                lomin=lon_min,
+                lomax=lon_max
+            )
+            
+            if not raw_states:
+                logger.info("No aircraft detected in area")
+                return {
+                    "success": True,
+                    "updated_count": 0,
+                    "total_states": 0,
+                    "errors": 0
+                }
+            
+            # Parse raw state vectors into structured data
+            state_vectors = self.opensky_client.parse_state_vectors(raw_states)
+            
+            logger.info(f"Parsed {len(state_vectors)} state vectors")
+            
+            # Update positions for known flights only (filter by active status)
+            updated_count = 0
+            error_count = 0
+            
+            for state_vector in state_vectors:
+                try:
+                    # Only update if flight exists in our DB (active tracking)
+                    flight = await self.flight_repo.update_realtime_position(
+                        icao24=state_vector.icao24,
+                        state_vector=state_vector
+                    )
+                    
+                    if flight:
+                        updated_count += 1
+                        logger.debug(
+                            f"✅ Updated position for {state_vector.icao24} "
+                            f"({state_vector.callsign}) - "
+                            f"Pos: ({state_vector.latitude:.4f}, {state_vector.longitude:.4f}), "
+                            f"Alt: {state_vector.baro_altitude}m, "
+                            f"Speed: {state_vector.velocity}m/s"
+                        )
+                    
+                except Exception as e:
+                    error_count += 1
+                    logger.warning(
+                        f"Failed to update position for {state_vector.icao24}: {str(e)}"
+                    )
+            
+            # Summary
+            logger.info(
+                f"✅ Real-time position sync completed: "
+                f"{updated_count} flights updated, "
+                f"{len(state_vectors)} total states, "
+                f"{error_count} errors"
+            )
+            
+            return {
+                "success": True,
+                "updated_count": updated_count,
+                "total_states": len(state_vectors),
+                "errors": error_count,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Real-time position sync failed: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "updated_count": 0,
+                "total_states": 0,
+                "errors": 1,
+                "error_message": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }

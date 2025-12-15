@@ -69,6 +69,17 @@ class FlightSyncScheduler:
             misfire_grace_time=180
         )
         
+        # Add real-time position tracking job (every 5 minutes)
+        self._position_tracking_job = self.scheduler.add_job(
+            self._realtime_position_job,
+            trigger=IntervalTrigger(minutes=5),
+            id="realtime_position_job",
+            name="Real-time Position Tracking",
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=300
+        )
+        
         self.scheduler.start()
         self._is_running = True
         
@@ -77,6 +88,7 @@ class FlightSyncScheduler:
         )
         logger.info("Civil recall scheduler started with 2min interval")
         logger.info("Departure monitoring scheduler started with 3min interval")
+        logger.info("Real-time position tracking scheduler started with 5min interval")
     
     async def stop(self):
         """Stop the scheduler"""
@@ -284,6 +296,44 @@ class FlightSyncScheduler:
                 logger.error(f"Error in manual sync: {str(e)}", exc_info=True)
                 return {
                     "status": "error",
+                    "error": str(e),
+                    "triggered_at": datetime.utcnow().isoformat()
+                }
+            finally:
+                await db.close()
+    
+    async def _realtime_position_job(self):
+        """
+        Internal job method for real-time position tracking.
+        Fetches OpenSky state vectors every 5 minutes to update aircraft positions.
+        """
+        async with AsyncSessionLocal() as db:
+            try:
+                logger.info("🛰️ Executing real-time position tracking")
+                
+                orchestrator = FlightOrchestrator(db)
+                await orchestrator.initialize()
+                
+                # Sync positions from OpenSky state vectors
+                result = await orchestrator.sync_realtime_positions()
+                
+                if result["success"]:
+                    logger.info(
+                        f"✅ Position tracking completed: "
+                        f"{result['updated_count']} flights updated, "
+                        f"{result['total_states']} states processed"
+                    )
+                else:
+                    logger.error(
+                        f"❌ Position tracking failed: {result.get('error_message', 'Unknown error')}"
+                    )
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error in position tracking job: {str(e)}", exc_info=True)
+                return {
+                    "success": False,
                     "error": str(e),
                     "triggered_at": datetime.utcnow().isoformat()
                 }

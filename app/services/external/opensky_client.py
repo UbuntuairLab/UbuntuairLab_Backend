@@ -307,6 +307,84 @@ class OpenSkyClient:
             logger.error(f"Failed to fetch states: {str(e)}")
             raise
     
+    def parse_state_vector(self, state: List) -> Optional["StateVectorData"]:
+        """
+        Parse raw OpenSky state vector into StateVectorData schema.
+        
+        State vector structure (17+ elements):
+        [0]  icao24 (str)
+        [1]  callsign (str)
+        [2]  origin_country (str)
+        [3]  time_position (int, Unix timestamp)
+        [4]  last_contact (int, Unix timestamp)
+        [5]  longitude (float, degrees)
+        [6]  latitude (float, degrees)
+        [7]  baro_altitude (float, meters)
+        [8]  on_ground (bool)
+        [9]  velocity (float, m/s)
+        [10] true_track (float, degrees) - heading
+        [11] vertical_rate (float, m/s)
+        [12] sensors (array)
+        [13] geo_altitude (float, meters)
+        [14] squawk (str)
+        [15] spi (bool)
+        [16] position_source (int)
+        [17] category (int) - if extended=1
+        
+        Args:
+            state: Raw state vector list from OpenSky API
+        
+        Returns:
+            StateVectorData object or None if parsing fails
+        """
+        from app.schemas.opensky import StateVectorData
+        
+        try:
+            if not state or len(state) < 12:
+                return None
+            
+            return StateVectorData(
+                icao24=state[0],
+                callsign=state[1],
+                origin_country=state[2],
+                time_position=state[3],
+                last_contact=state[4],
+                longitude=state[5],
+                latitude=state[6],
+                baro_altitude=state[7],
+                on_ground=state[8],
+                velocity=state[9],
+                heading=state[10],  # true_track
+                vertical_rate=state[11],
+                geo_altitude=state[13] if len(state) > 13 else None,
+                squawk=state[14] if len(state) > 14 else None,
+                category=state[17] if len(state) > 17 else None
+            )
+        except (IndexError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to parse state vector: {str(e)}")
+            return None
+    
+    def parse_state_vectors(self, states: List[List]) -> List["StateVectorData"]:
+        """
+        Parse multiple raw state vectors into StateVectorData objects.
+        
+        Args:
+            states: List of raw state vector arrays from OpenSky API
+        
+        Returns:
+            List of successfully parsed StateVectorData objects
+        """
+        from app.schemas.opensky import StateVectorData
+        
+        parsed = []
+        for state in states:
+            state_data = self.parse_state_vector(state)
+            if state_data:
+                parsed.append(state_data)
+        
+        logger.info(f"Parsed {len(parsed)}/{len(states)} state vectors")
+        return parsed
+    
     async def get_arrivals_and_departures(
         self,
         airport_icao: str,

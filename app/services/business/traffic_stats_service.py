@@ -133,16 +133,17 @@ async def get_weather_data() -> Dict:
     TODO: Intégrer avec une vraie API météo (OpenWeatherMap, Météo France, etc.)
     
     Returns:
-        Dict avec température, vent, visibilité, pluie, score
+        Dict avec température, vent (vitesse et direction), visibilité, pluie, score
     """
     # TODO: Appeler une API météo réelle
     # Pour l'instant, retourner des données simulées réalistes
     return {
-        "temperature": 22.0,  # °C
-        "wind_speed": 12.0,   # km/h
-        "visibility": 10.0,    # km
-        "rain": 0.0,          # mm
-        "score": 0.85         # 0.0-1.0 (conditions favorables)
+        "temperature": 22.0,     # °C
+        "wind_speed": 12.0,      # km/h
+        "wind_direction": 180.0,  # degrés (0-360, 180 = vent du sud)
+        "visibility": 10.0,       # km
+        "rain": 0.0,             # mm
+        "score": 0.85            # 0.0-1.0 (conditions favorables)
     }
 
 
